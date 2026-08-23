@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetSentinel-AI — Attack Graph Dashboard</title>
+    <meta name="description" content="Autonomous Network Vulnerability Assessment & Attack Path Prediction Engine">
+    
+    <!-- Cytoscape.js -->
+    <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+    <!-- Cytoscape layout extensions -->
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+    <!-- SockJS + STOMP for WebSocket -->
+    <script src="https://unpkg.com/sockjs-client@1.6.1/dist/sockjs.min.js"></script>
+    <script src="https://unpkg.com/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-secondary: #111827;
+            --bg-card: #1a1f35;
+            --bg-card-hover: #1f2642;
+            --border: #2a3050;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-cyan: #06b6d4;
+            --accent-blue: #3b82f6;
+            --accent-purple: #8b5cf6;
+            --accent-pink: #ec4899;
+            --accent-green: #10b981;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+            --gradient-cyber: linear-gradient(135deg, #06b6d4, #3b82f6, #8b5cf6);
+            --gradient-danger: linear-gradient(135deg, #ef4444, #f59e0b);
+            --glass-bg: rgba(26, 31, 53, 0.85);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --shadow-glow: 0 0 30px rgba(6, 182, 212, 0.15);
+            --radius: 12px;
+            --radius-lg: 16px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        /* Animated background grid */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: 
+                radial-gradient(ellipse at 20% 50%, rgba(6, 182, 212, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 20%, rgba(139, 92, 246, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 80%, rgba(59, 130, 246, 0.05) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ═══════════ HEADER ═══════════ */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--glass-border);
+            position: relative;
+            z-index: 100;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: var(--gradient-cyber);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 800;
+            color: white;
+            box-shadow: 0 0 20px rgba(6, 182, 212, 0.3);
+        }
+
+        .logo-text {
+            font-size: 18px;
+            font-weight: 700;
+            background: var(--gradient-cyber);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        .logo-tag {
+            font-size: 10px;
+            font-weight: 500;
+            color: var(--text-muted);
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+        }
+
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .scan-input {
+            padding: 8px 14px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            width: 220px;
+            transition: all 0.3s;
+        }
+
+        .scan-input:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.15);
+        }
+
+        .btn {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 8px;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn-primary {
+            background: var(--gradient-cyber);
+            color: white;
+            box-shadow: 0 4px 15px rgba(6, 182, 212, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 25px rgba(6, 182, 212, 0.4);
+        }
+
+        .btn-primary:active { transform: translateY(0); }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-idle {
+            background: rgba(100, 116, 139, 0.2);
+            color: var(--text-muted);
+            border: 1px solid rgba(100, 116, 139, 0.3);
+        }
+
+        .status-scanning {
+            background: rgba(6, 182, 212, 0.15);
+            color: var(--accent-cyan);
+            border: 1px solid rgba(6, 182, 212, 0.3);
+            animation: pulse-badge 2s infinite;
+        }
+
+        .status-complete {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--accent-green);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        @keyframes pulse-badge {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .dot-idle { background: var(--text-muted); }
+        .dot-scanning { background: var(--accent-cyan); animation: dot-pulse 1.5s infinite; }
+        .dot-complete { background: var(--accent-green); }
+
+        @keyframes dot-pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.5); opacity: 0.5; }
+        }
+
+        /* ═══════════ MAIN LAYOUT ═══════════ */
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 360px;
+            height: calc(100vh - 57px);
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ═══════════ GRAPH PANEL ═══════════ */
+        .graph-panel {
+            position: relative;
+            background: var(--bg-primary);
+        }
+
+        #cy {
+            width: 100%;
+            height: 100%;
+        }
+
+        .graph-legend {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--glass-border);
+            border-radius: var(--radius);
+            padding: 14px 18px;
+            display: flex;
+            gap: 16px;
+            font-size: 11px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-secondary);
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .graph-stats {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .stat-chip {
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--glass-border);
+            border-radius: 8px;
+            padding: 8px 14px;
+            font-size: 11px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .stat-value {
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent-cyan);
+        }
+
+        /* ═══════════ SIDE PANEL ═══════════ */
+        .side-panel {
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+            padding: 0;
+        }
+
+        .panel-tab {
+            flex: 1;
+            padding: 12px 8px;
+            text-align: center;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .panel-tab:hover { color: var(--text-secondary); }
+
+        .panel-tab.active {
+            color: var(--accent-cyan);
+            border-bottom-color: var(--accent-cyan);
+        }
+
+        .panel-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .panel-content::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .panel-content::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .panel-content::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+
+        .tab-section { display: none; }
+        .tab-section.active { display: block; }
+
+        /* ═══════════ ATTACK PATHS ═══════════ */
+        .attack-path-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .attack-path-card:hover {
+            border-color: var(--accent-cyan);
+            background: var(--bg-card-hover);
+            transform: translateX(2px);
+        }
+
+        .attack-path-card.active {
+            border-color: var(--accent-red);
+            box-shadow: 0 0 15px rgba(239, 68, 68, 0.15);
+        }
+
+        .path-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .path-rank {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--accent-cyan);
+        }
+
+        .path-risk {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .risk-critical { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
+        .risk-high { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); }
+        .risk-medium { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
+
+        .path-route {
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .path-route .hop {
+            color: var(--text-primary);
+        }
+
+        .path-route .arrow {
+            color: var(--accent-red);
+            margin: 0 4px;
+        }
+
+        .path-bottleneck {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+        }
+
+        .cve-tag {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            margin-right: 4px;
+        }
+
+        .cve-critical { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
+        .cve-high { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); }
+        .cve-medium { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
+
+        /* ═══════════ NODE DETAILS ═══════════ */
+        .node-detail-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+
+        .node-detail-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .node-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+
+        .node-name {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .node-ip {
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            font-size: 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+        }
+
+        .detail-label { color: var(--text-muted); }
+        .detail-value { font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
+        .vuln-list {
+            margin-top: 12px;
+        }
+
+        .vuln-item {
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 6px;
+        }
+
+        .vuln-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+
+        .vuln-desc {
+            font-size: 11px;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
+        /* ═══════════ REMEDIATION ═══════════ */
+        .remediation-content {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            color: var(--text-secondary);
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            padding: 16px;
+            border: 1px solid var(--border);
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+        }
+
+        /* ═══════════ LOG FEED ═══════════ */
+        .log-entry {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            padding: 4px 0;
+            color: var(--text-muted);
+            border-bottom: 1px solid rgba(255,255,255,0.02);
+            line-height: 1.5;
+        }
+
+        .log-entry .log-time {
+            color: var(--text-muted);
+            margin-right: 8px;
+        }
+
+        .log-entry .log-type {
+            font-weight: 600;
+            margin-right: 6px;
+        }
+
+        .log-type-host { color: var(--accent-green); }
+        .log-type-cve { color: var(--accent-amber); }
+        .log-type-path { color: var(--accent-red); }
+        .log-type-info { color: var(--accent-cyan); }
+
+        /* ═══════════ EMPTY STATE ═══════════ */
+        .empty-state {
+            text-align: center;
+            padding: 60px 30px;
+            color: var(--text-muted);
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        .empty-state-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .empty-state-desc {
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        /* ═══════════ ANIMATIONS ═══════════ */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .animate-in {
+            animation: fadeInUp 0.3s ease-out;
+        }
+
+        /* ═══════════ LOADING SPINNER ═══════════ */
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.2);
+            border-top-color: var(--accent-cyan);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            display: inline-block;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ═══════════ HEADER ═══════════ -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">
+                <div class="logo-icon">NS</div>
+                <div>
+                    <div class="logo-text">NetSentinel-AI</div>
+                    <div class="logo-tag">Autonomous Vulnerability Assessment</div>
+                </div>
+            </div>
+        </div>
+        <div class="header-controls">
+            <div id="statusBadge" class="status-badge status-idle">
+                <span class="dot dot-idle" id="statusDot"></span>
+                <span id="statusText">Ready</span>
+            </div>
+            <input type="text" id="cidrInput" class="scan-input" value="192.168.10.0/24" placeholder="CIDR Range">
+            <button id="scanBtn" class="btn btn-primary" onclick="launchScan()">
+                ⚡ Launch Scan
+            </button>
+        </div>
+    </header>
+
+    <!-- ═══════════ MAIN ═══════════ -->
+    <div class="main-container">
+        <!-- Graph Panel -->
+        <div class="graph-panel">
+            <div id="cy"></div>
+
+            <div class="graph-stats" id="graphStats" style="display:none;">
+                <div class="stat-chip">
+                    🖥 Nodes: <span class="stat-value" id="statNodes">0</span>
+                </div>
+                <div class="stat-chip">
+                    🔗 Edges: <span class="stat-value" id="statEdges">0</span>
+                </div>
+                <div class="stat-chip">
+                    🐛 CVEs: <span class="stat-value" id="statCves">0</span>
+                </div>
+                <div class="stat-chip">
+                    ⚠️ Paths: <span class="stat-value" id="statPaths">0</span>
+                </div>
+                <div class="stat-chip">
+                    🎯 Max Risk: <span class="stat-value" id="statRisk">—</span>
+                </div>
+            </div>
+
+            <div class="graph-legend" id="graphLegend" style="display:none;">
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:#ef4444;"></div> External
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:#f59e0b;"></div> DMZ
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:#3b82f6;"></div> Application
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:#8b5cf6;"></div> Data
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background:#ec4899;"></div> Crown Jewel
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: repeating-linear-gradient(90deg, #ef4444 0px, #ef4444 4px, transparent 4px, transparent 8px); width: 20px; height: 3px; border-radius: 0;"></div> Attack Path
+                </div>
+            </div>
+        </div>
+
+        <!-- Side Panel -->
+        <div class="side-panel">
+            <div class="panel-tabs">
+                <div class="panel-tab active" data-tab="paths" onclick="switchTab('paths')">⚔️ Paths</div>
+                <div class="panel-tab" data-tab="details" onclick="switchTab('details')">📋 Details</div>
+                <div class="panel-tab" data-tab="remediation" onclick="switchTab('remediation')">🛡 Remediate</div>
+                <div class="panel-tab" data-tab="logs" onclick="switchTab('logs')">📡 Live</div>
+            </div>
+            <div class="panel-content">
+                <!-- Paths Tab -->
+                <div id="tab-paths" class="tab-section active">
+                    <div class="empty-state" id="pathsEmpty">
+                        <div class="empty-state-icon">🛡️</div>
+                        <div class="empty-state-title">No Attack Paths</div>
+                        <div class="empty-state-desc">Launch a scan to discover multi-hop compromise chains through your network.</div>
+                    </div>
+                    <div id="pathsList"></div>
+                </div>
+
+                <!-- Details Tab -->
+                <div id="tab-details" class="tab-section">
+                    <div class="empty-state" id="detailsEmpty">
+                        <div class="empty-state-icon">🔍</div>
+                        <div class="empty-state-title">Select a Node</div>
+                        <div class="empty-state-desc">Click on any node in the attack graph to view host details and vulnerabilities.</div>
+                    </div>
+                    <div id="nodeDetails"></div>
+                </div>
+
+                <!-- Remediation Tab -->
+                <div id="tab-remediation" class="tab-section">
+                    <div class="empty-state" id="remediationEmpty">
+                        <div class="empty-state-icon">🔧</div>
+                        <div class="empty-state-title">No Playbook</div>
+                        <div class="empty-state-desc">Complete a scan to generate automated Ansible playbooks and hardening scripts.</div>
+                    </div>
+                    <div id="remediationContent"></div>
+                </div>
+
+                <!-- Live Logs Tab -->
+                <div id="tab-logs" class="tab-section">
+                    <div id="logFeed">
+                        <div class="log-entry">
+                            <span class="log-time">--:--:--</span>
+                            <span class="log-type log-type-info">[SYS]</span>
+                            NetSentinel-AI dashboard initialized. Awaiting scan...
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════
+        // NetSentinel-AI Dashboard Controller
+        // ═══════════════════════════════════════════════
+
+        let cy = null;
+        let currentScanId = null;
+        let graphData = null;
+        let attackPaths = [];
+        let selectedPathId = null;
+
+        // ═══════════ INITIALIZE CYTOSCAPE ═══════════
+        function initCytoscape() {
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                style: [
+                    // ── Node Base Style ──
+                    {
+                        selector: 'node',
+                        style: {
+                            'label': 'data(label)',
+                            'text-valign': 'bottom',
+                            'text-halign': 'center',
+                            'font-size': '9px',
+                            'font-family': 'Inter, sans-serif',
+                            'font-weight': '600',
+                            'color': '#94a3b8',
+                            'text-margin-y': 8,
+                            'width': 40,
+                            'height': 40,
+                            'border-width': 2,
+                            'border-color': '#2a3050',
+                            'text-outline-width': 2,
+                            'text-outline-color': '#0a0e1a',
+                            'transition-property': 'width, height, border-width, border-color, background-color',
+                            'transition-duration': '0.3s'
+                        }
+                    },
+                    // ── Tier Colors ──
+                    { selector: 'node[tier="EXTERNAL"]', style: { 'background-color': '#ef4444', 'border-color': '#991b1b', shape: 'diamond' } },
+                    { selector: 'node[tier="DMZ"]', style: { 'background-color': '#f59e0b', 'border-color': '#b45309' } },
+                    { selector: 'node[tier="APPLICATION"]', style: { 'background-color': '#3b82f6', 'border-color': '#1d4ed8' } },
+                    { selector: 'node[tier="DATA"]', style: { 'background-color': '#8b5cf6', 'border-color': '#6d28d9' } },
+                    { selector: 'node[tier="CROWN_JEWEL"]', style: { 'background-color': '#ec4899', 'border-color': '#be185d', 'shape': 'star', 'width': 50, 'height': 50 } },
+                    // ── Vulnerability Scaling ──
+                    { selector: 'node[vulnCount > 0]', style: { 'border-width': 3 } },
+                    { selector: 'node[vulnCount > 2]', style: { 'border-width': 4, 'width': 48, 'height': 48 } },
+                    // ── Attack Path Nodes ──
+                    { selector: 'node[onAttackPath]', style: { 'border-color': '#ef4444', 'border-width': 3 } },
+                    // ── Edge Base Style ──
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 1.5,
+                            'line-color': '#2a3050',
+                            'target-arrow-color': '#2a3050',
+                            'target-arrow-shape': 'triangle',
+                            'curve-style': 'bezier',
+                            'arrow-scale': 0.8,
+                            'opacity': 0.4,
+                            'transition-property': 'line-color, width, opacity, target-arrow-color',
+                            'transition-duration': '0.3s'
+                        }
+                    },
+                    // ── Attack Path Edges ──
+                    {
+                        selector: 'edge[onAttackPath]',
+                        style: {
+                            'line-color': '#ef4444',
+                            'target-arrow-color': '#ef4444',
+                            'width': 3,
+                            'opacity': 0.9,
+                            'line-style': 'solid'
+                        }
+                    },
+                    // ── Selected ──
+                    { selector: ':selected', style: { 'border-color': '#06b6d4', 'border-width': 4 } },
+                    // ── Highlighted path ──
+                    { selector: '.highlighted-path-node', style: { 'border-color': '#ef4444', 'border-width': 5, 'width': 55, 'height': 55 } },
+                    { selector: '.highlighted-path-edge', style: { 'line-color': '#ef4444', 'target-arrow-color': '#ef4444', 'width': 4, 'opacity': 1 } },
+                    { selector: '.dimmed', style: { 'opacity': 0.15 } }
+                ],
+                layout: { name: 'preset' },
+                wheelSensitivity: 0.3,
+                minZoom: 0.3,
+                maxZoom: 3
+            });
+
+            // Node click handler
+            cy.on('tap', 'node', function(evt) {
+                showNodeDetails(evt.target.data());
+                switchTab('details');
+            });
+
+            cy.on('tap', function(evt) {
+                if (evt.target === cy) {
+                    document.getElementById('nodeDetails').innerHTML = '';
+                    document.getElementById('detailsEmpty').style.display = 'block';
+                }
+            });
+        }
+
+        // ═══════════ LAUNCH SCAN ═══════════
+        async function launchScan() {
+            const cidr = document.getElementById('cidrInput').value;
+            const btn = document.getElementById('scanBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Scanning...';
+            setStatus('scanning', 'Scanning...');
+            addLog('info', `Initiating scan of ${cidr}...`);
+
+            try {
+                const response = await fetch('/api/scan/sync', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cidr })
+                });
+
+                const result = await response.json();
+                currentScanId = result.scanId;
+                addLog('info', `Scan ${result.scanId} complete — ${result.hostsDiscovered} hosts, ${result.cvesMatched} CVEs`);
+
+                // Fetch graph data
+                await loadGraphData(result.scanId);
+                await loadAttackPaths(result.scanId);
+                await loadRemediation(result.scanId);
+
+                setStatus('complete', `Done (${result.durationMs}ms)`);
+
+                // Update stats
+                document.getElementById('statNodes').textContent = result.graphNodes;
+                document.getElementById('statEdges').textContent = result.graphEdges;
+                document.getElementById('statCves').textContent = result.cvesMatched;
+                document.getElementById('statPaths').textContent = result.attackPaths;
+                document.getElementById('statRisk').textContent = result.highestRisk.toFixed(4);
+                document.getElementById('graphStats').style.display = 'flex';
+                document.getElementById('graphLegend').style.display = 'flex';
+
+            } catch (err) {
+                addLog('info', `Error: ${err.message}`);
+                setStatus('idle', 'Error');
+            }
+
+            btn.disabled = false;
+            btn.innerHTML = '⚡ Launch Scan';
+        }
+
+        // ═══════════ LOAD GRAPH DATA ═══════════
+        async function loadGraphData(scanId) {
+            const response = await fetch(`/api/scan/${scanId}/graph`);
+            const data = await response.json();
+            graphData = data;
+            renderGraph(data);
+        }
+
+        function renderGraph(data) {
+            cy.elements().remove();
+
+            // Add elements
+            const elements = data.elements || [];
+            cy.add(elements);
+
+            // Apply dagre layout for hierarchical display
+            cy.layout({
+                name: 'dagre',
+                rankDir: 'LR',
+                nodeSep: 60,
+                edgeSep: 20,
+                rankSep: 140,
+                padding: 40,
+                animate: true,
+                animationDuration: 800,
+                animationEasing: 'ease-out-cubic'
+            }).run();
+
+            // Log node discoveries
+            elements.filter(e => e.group === 'nodes').forEach(el => {
+                const d = el.data;
+                if (d.tier !== 'EXTERNAL') {
+                    addLog('host', `${d.label} (${d.ip}) — ${d.tier} | ${d.vulnCount} CVEs | Risk: ${d.riskScore}`);
+                }
+            });
+        }
+
+        // ═══════════ LOAD ATTACK PATHS ═══════════
+        async function loadAttackPaths(scanId) {
+            const response = await fetch(`/api/scan/${scanId}/graph`);
+            const data = await response.json();
+            attackPaths = data.attackPaths || [];
+            renderAttackPaths(attackPaths);
+
+            attackPaths.forEach(p => {
+                const bn = p.bottleneck ? p.bottleneck.cveId : 'none';
+                addLog('path', `Path #${p.pathId}: Risk=${p.risk} | ${p.hops.join(' → ')} | Bottleneck: ${bn}`);
+            });
+        }
+
+        function renderAttackPaths(paths) {
+            const container = document.getElementById('pathsList');
+            const emptyState = document.getElementById('pathsEmpty');
+
+            if (paths.length === 0) {
+                emptyState.style.display = 'block';
+                container.innerHTML = '';
+                return;
+            }
+            emptyState.style.display = 'none';
+
+            container.innerHTML = paths.map(p => {
+                const riskClass = p.risk > 0.1 ? 'risk-critical' : p.risk > 0.01 ? 'risk-high' : 'risk-medium';
+                const hopsHtml = p.hops.map(h => `<span class="hop">${h}</span>`).join('<span class="arrow">→</span>');
+                const bottleneck = p.bottleneck ? `
+                    <div class="path-bottleneck">
+                        <span class="cve-tag cve-${p.bottleneck.severity.toLowerCase()}">${p.bottleneck.cveId}</span>
+                        <span style="color:var(--text-muted);font-size:10px;">CVSS ${p.bottleneck.cvss} — ${p.bottleneck.description.substring(0, 80)}...</span>
+                    </div>` : '';
+
+                return `
+                    <div class="attack-path-card animate-in ${selectedPathId === p.pathId ? 'active' : ''}" 
+                         onclick="highlightPath(${p.pathId})" data-path-id="${p.pathId}">
+                        <div class="path-header">
+                            <span class="path-rank">⚔ Attack Path #${p.pathId}</span>
+                            <span class="path-risk ${riskClass}">Risk: ${p.risk.toFixed(4)}</span>
+                        </div>
+                        <div class="path-route">${hopsHtml}</div>
+                        ${bottleneck}
+                    </div>`;
+            }).join('');
+        }
+
+        // ═══════════ HIGHLIGHT PATH ═══════════
+        function highlightPath(pathId) {
+            if (selectedPathId === pathId) {
+                // Deselect
+                selectedPathId = null;
+                cy.elements().removeClass('highlighted-path-node highlighted-path-edge dimmed');
+                renderAttackPaths(attackPaths);
+                return;
+            }
+
+            selectedPathId = pathId;
+            const path = attackPaths.find(p => p.pathId === pathId);
+            if (!path) return;
+
+            // Dim everything
+            cy.elements().addClass('dimmed');
+            cy.elements().removeClass('highlighted-path-node highlighted-path-edge');
+
+            // Highlight path nodes
+            path.hops.forEach(hostname => {
+                cy.nodes().filter(n => n.data('label') === hostname).forEach(n => {
+                    n.removeClass('dimmed');
+                    n.addClass('highlighted-path-node');
+                });
+            });
+
+            // Highlight path edges
+            if (path.edges) {
+                path.edges.forEach(edgeId => {
+                    cy.edges().filter(e => e.data('id') === edgeId).forEach(e => {
+                        e.removeClass('dimmed');
+                        e.addClass('highlighted-path-edge');
+                    });
+                });
+            }
+
+            renderAttackPaths(attackPaths);
+        }
+
+        // ═══════════ NODE DETAILS ═══════════
+        function showNodeDetails(nodeData) {
+            const container = document.getElementById('nodeDetails');
+            document.getElementById('detailsEmpty').style.display = 'none';
+
+            const tierColors = {
+                'EXTERNAL': '#ef4444', 'DMZ': '#f59e0b',
+                'APPLICATION': '#3b82f6', 'DATA': '#8b5cf6', 'CROWN_JEWEL': '#ec4899'
+            };
+            const tierIcons = {
+                'EXTERNAL': '🌐', 'DMZ': '🛡', 'APPLICATION': '⚙️', 'DATA': '💾', 'CROWN_JEWEL': '👑'
+            };
+
+            const vulns = (nodeData.vulnerabilities || []).map(v => {
+                const sevClass = v.severity === 'CRITICAL' ? 'cve-critical' :
+                                 v.severity === 'HIGH' ? 'cve-high' : 'cve-medium';
+                return `
+                    <div class="vuln-item">
+                        <div class="vuln-item-header">
+                            <span class="cve-tag ${sevClass}">${v.cveId}</span>
+                            <span class="cve-tag ${sevClass}">CVSS ${v.cvss}</span>
+                        </div>
+                        <div class="vuln-desc">${v.description.substring(0, 120)}...</div>
+                    </div>`;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="node-detail-card animate-in">
+                    <div class="node-detail-header">
+                        <div class="node-icon" style="background:${tierColors[nodeData.tier] || '#666'}20;color:${tierColors[nodeData.tier] || '#666'}">
+                            ${tierIcons[nodeData.tier] || '🖥'}
+                        </div>
+                        <div>
+                            <div class="node-name">${nodeData.label}</div>
+                            <div class="node-ip">${nodeData.ip}</div>
+                        </div>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Network Tier</span>
+                        <span class="detail-value" style="color:${tierColors[nodeData.tier]}">${nodeData.tier}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Operating System</span>
+                        <span class="detail-value">${nodeData.os || '—'}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Open Ports</span>
+                        <span class="detail-value">${(nodeData.openPorts || []).join(', ') || '—'}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Asset Criticality</span>
+                        <span class="detail-value">${nodeData.criticality}/10</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Risk Score</span>
+                        <span class="detail-value" style="color:var(--accent-red)">${nodeData.riskScore}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">P(Compromise)</span>
+                        <span class="detail-value" style="color:var(--accent-amber)">${nodeData.compromiseProb}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Vulnerabilities</span>
+                        <span class="detail-value" style="color:var(--accent-red)">${nodeData.vulnCount}</span>
+                    </div>
+                    ${vulns ? `<div class="vuln-list">${vulns}</div>` : ''}
+                </div>`;
+        }
+
+        // ═══════════ LOAD REMEDIATION ═══════════
+        async function loadRemediation(scanId) {
+            const response = await fetch(`/api/scan/${scanId}/remediation`);
+            const data = await response.json();
+
+            document.getElementById('remediationEmpty').style.display = 'none';
+            document.getElementById('remediationContent').innerHTML =
+                `<div class="remediation-content">${escapeHtml(data.playbook)}</div>`;
+        }
+
+        // ═══════════ UTILITIES ═══════════
+        function setStatus(state, text) {
+            const badge = document.getElementById('statusBadge');
+            const dot = document.getElementById('statusDot');
+            const label = document.getElementById('statusText');
+
+            badge.className = 'status-badge status-' + state;
+            dot.className = 'dot dot-' + state;
+            label.textContent = text;
+        }
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-section').forEach(s => s.classList.remove('active'));
+            document.querySelector(`.panel-tab[data-tab="${tabName}"]`).classList.add('active');
+            document.getElementById(`tab-${tabName}`).classList.add('active');
+        }
+
+        function addLog(type, message) {
+            const feed = document.getElementById('logFeed');
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+            const typeLabel = { host: 'HOST', cve: 'CVE', path: 'PATH', info: 'SYS' }[type] || 'SYS';
+            
+            const entry = document.createElement('div');
+            entry.className = 'log-entry animate-in';
+            entry.innerHTML = `<span class="log-time">${time}</span><span class="log-type log-type-${type}">[${typeLabel}]</span> ${escapeHtml(message)}`;
+            feed.insertBefore(entry, feed.firstChild);
+
+            // Keep log manageable
+            while (feed.children.length > 100) {
+                feed.removeChild(feed.lastChild);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ═══════════ INIT ═══════════
+        document.addEventListener('DOMContentLoaded', () => {
+            initCytoscape();
+        });
+    </script>
+</body>
+</html>
