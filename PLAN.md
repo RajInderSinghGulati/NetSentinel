@@ -45,25 +45,25 @@ Contributions, in order of strength:
 ### Phase A — Real data and scanner (3–4 days)
 - [ ] Real `NetworkScanner` (TCP connect and banner grab); keep the simulator for tests.
 - [ ] Docker Compose lab (DMZ/App/DB containers with known vulnerable images).
-- [ ] Offline NVD snapshot for reproducibility.
-- [ ] CPE-matching accuracy test on a hand-labelled set.
+- [x] Offline NVD snapshot for reproducibility (`scripts/fetch_nvd_snapshot.py`, 492 CVEs for the simulated network).
+- [x] CPE-matching test on a hand-labelled set (33 cases, matcher only; banner-to-CPE accuracy still needs the real scanner).
 
 ### Phase B — Learned scorer (4–5 days)
-- [ ] Dataset build script in `scripts/` (NVD + KEV + EPSS + Exploit-DB), pinned snapshot.
-- [ ] Remove synthetic training; offline training job, ship the trained model file.
-- [ ] Baselines: CVSS threshold, EPSS, logistic regression, MLP.
-- [ ] Metrics: AUROC, PR-AUC, Brier score, reliability plot, temporal split.
-- [ ] Feature ablation (CWE, age, etc.).
+- [x] Dataset build script in `scripts/` (NVD + KEV + EPSS + Exploit-DB); manifest records file hashes.
+- [x] Remove synthetic training; offline training job, trained model shipped as JSON (gradient-boosted trees, evaluated in plain Java).
+- [x] Baselines: CVSS, point-in-time EPSS (current EPSS is label-leaky), logistic regression, MLP.
+- [x] Metrics: AUROC, PR-AUC, Brier (+skill score), ECE, bootstrap CIs, reliability plot, temporal split (`results/`).
+- [x] Feature ablation (CVSS, CWE, vendor, affected-CPE count).
 
 ### Phase C — Graph risk model (3 days)
-- [ ] Noisy-OR host compromise probability.
-- [ ] Correlated-edge variant.
+- [x] Noisy-OR host compromise probability (`RiskModel`).
+- [x] Correlated-edge variant (shared exploit = one event) + Monte Carlo cross-check; analytic model is an upper bound on cyclic graphs.
 - [ ] Compare with Yen's top-K by `1-p`: Kendall tau and crown-jewel risk difference.
 
 ### Phase D — Remediation optimizer (3–4 days)
-- [ ] Patch → edge-removal mapping from CVE records.
-- [ ] Greedy, ILP and CVSS-first strategies; risk-vs-budget curve.
-- [ ] Validate Ansible with `ansible-lint` and `--check`; re-scan the lab after patching to confirm paths are gone.
+- [x] Patch → edge-removal mapping (patch unit = upgrade one product on one host).
+- [x] Greedy, exact (exhaustive; the objective is non-linear so an ILP does not apply), CVSS-first, exploit-prob-first, random; risk-vs-budget curve (`/api/scan/{id}/optimize`).
+- [ ] Validate Ansible with `ansible-lint` and `--check` (`scripts/validate_remediation.py` written; structure check passes, lint needs Docker running; `--check` needs the lab). Re-scan after patching: done on the simulated inventory (`/api/scan/{id}/verify`).
 
 ### Phase E — Evaluation (3 days)
 - [ ] 3 hand-built topologies plus synthetic ones at 50/200/1000 hosts.
@@ -73,7 +73,7 @@ Contributions, in order of strength:
 
 ### Phase F — Engineering polish (2 days)
 - [ ] JUnit and Testcontainers tests.
-- [ ] UI display of risk-reduction results.
+- [x] UI display of risk-reduction results (Remediate tab: KPIs, patch list, risk-vs-budget chart, re-scan verification).
 - [ ] README: replace claims with measured numbers; add Docker quickstart.
 
 ### Phase G — Paper (4–5 days)

@@ -31,9 +31,13 @@ public class ScanResult {
     // Tier 3 outputs
     private List<AttackPath> attackPaths;
     private double highestPathRisk;
+    /** Criticality-weighted expected number of compromised crown jewels (see RiskModel). */
+    private double crownJewelRisk;
 
     // Tier 4 outputs
     private String remediationPlaybook;
+    private com.netsentinel.ai.RemediationGenerator.Remediation remediation;
+    private com.netsentinel.ai.PatchOptimizer.Plan patchPlan;
     private Map<String, Object> graphData;
 
     public ScanResult(ScanTarget target) {
@@ -74,9 +78,15 @@ public class ScanResult {
                 .max().orElse(0.0);
     }
     public double getHighestPathRisk() { return highestPathRisk; }
+    public double getCrownJewelRisk() { return crownJewelRisk; }
+    public void setCrownJewelRisk(double crownJewelRisk) { this.crownJewelRisk = crownJewelRisk; }
 
     public String getRemediationPlaybook() { return remediationPlaybook; }
     public void setRemediationPlaybook(String remediationPlaybook) { this.remediationPlaybook = remediationPlaybook; }
+    public com.netsentinel.ai.RemediationGenerator.Remediation getRemediation() { return remediation; }
+    public void setRemediation(com.netsentinel.ai.RemediationGenerator.Remediation remediation) { this.remediation = remediation; }
+    public com.netsentinel.ai.PatchOptimizer.Plan getPatchPlan() { return patchPlan; }
+    public void setPatchPlan(com.netsentinel.ai.PatchOptimizer.Plan patchPlan) { this.patchPlan = patchPlan; }
     public Map<String, Object> getGraphData() { return graphData; }
     public void setGraphData(Map<String, Object> graphData) { this.graphData = graphData; }
 

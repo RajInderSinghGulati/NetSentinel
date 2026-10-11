@@ -532,6 +532,40 @@
             overflow-y: auto;
         }
 
+
+        /* ═══════════ REMEDIATION OPTIMIZER ═══════════ */
+        .rem-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin-bottom: 12px;
+        }
+        .rem-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+        .rem-kpis { display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; }
+        .rem-kpi-value { font-size: 26px; font-weight: 800; }
+        .rem-kpi-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+        .rem-patch { font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        .rem-patch:last-child { border-bottom: none; }
+        .rem-patch b { color: var(--text-primary); }
+        .rem-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 10px; color: var(--text-secondary); margin-top: 6px; }
+        .rem-legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+        .rem-artifact-tabs { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+        .rem-artifact-tab {
+            font-size: 11px; padding: 4px 10px; border-radius: 8px; cursor: pointer;
+            border: 1px solid var(--border); color: var(--text-secondary); background: transparent;
+        }
+        .rem-artifact-tab.active { border-color: var(--accent-cyan); color: var(--accent-cyan); }
+        .rem-verify-ok { color: var(--accent-green); }
+        .rem-verify-bad { color: var(--accent-red); }
+
         /* ═══════════ LOG FEED ═══════════ */
         .log-entry {
             font-family: 'JetBrains Mono', monospace;
@@ -787,12 +821,9 @@
                 <div id="tab-remediation" class="tab-section">
                     <div class="empty-state" id="remediationEmpty">
                         <div class="empty-state-icon">🔧</div>
-                        <div class="empty-state-title">No Playbook</div>
-                        <div class="empty-state-desc">Complete a scan to generate automated Ansible playbooks and hardening scripts.</div>
+                        <div class="empty-state-title">No Remediation Plan</div>
+                        <div class="empty-state-desc">Complete a scan to get a budgeted patch plan, Ansible playbook and hardening script.</div>
                     </div>
-                    <button id="copyPlaybookBtn" class="btn-secondary" onclick="copyPlaybook()" style="display:none;">
-                        📋 Copy Playbook
-                    </button>
                     <div id="remediationContent"></div>
                 </div>
 
@@ -1287,14 +1318,118 @@
         }
 
         // ═══════════ REMEDIATION ═══════════
+        const STRATEGY_STYLE = {
+            CVSS_FIRST:         { label: 'CVSS-first',          color: '#f59e0b', width: 2 },
+            EXPLOIT_PROB_FIRST: { label: 'Exploit-prob-first',  color: '#8b5cf6', width: 2 },
+            RANDOM:             { label: 'Random (mean)',       color: '#64748b', width: 2, dash: '4 3' },
+            GREEDY:             { label: 'Greedy',              color: '#06b6d4', width: 2 },
+            OPTIMAL:            { label: 'Optimal',             color: '#10b981', width: 4 }
+        };
+        let remediationData = null, remediationScanId = null, remediationArtifact = 'report';
+
         async function loadRemediation(scanId) {
-            const response = await fetch(`/api/scan/${scanId}/remediation`);
-            const data = await response.json();
-            currentPlaybookText = data.playbook || '';
+            remediationScanId = scanId;
+            const [remRes, optRes] = await Promise.all([
+                fetch(`/api/scan/${scanId}/remediation`),
+                fetch(`/api/scan/${scanId}/optimize?maxBudget=6`)
+            ]);
+            remediationData = await remRes.json();
+            const opt = optRes.ok ? await optRes.json() : null;
+            currentPlaybookText = remediationData.playbook || '';
             document.getElementById('remediationEmpty').style.display = 'none';
-            document.getElementById('copyPlaybookBtn').style.display = 'flex';
-            document.getElementById('remediationContent').innerHTML =
-                `<div class="remediation-content">${escapeHtml(currentPlaybookText)}</div>`;
+            renderRemediation(remediationData, opt);
+        }
+
+        function renderRemediation(rem, opt) {
+            const before = rem.riskBefore, after = rem.riskAfter;
+            const pct = before > 0 ? (100 * (1 - after / before)) : 0;
+            const patches = (rem.patches || []).map((p, i) =>
+                `<div class="rem-patch"><b>${i + 1}.</b> ${escapeHtml(p)}</div>`).join('')
+                || '<div class="rem-patch">No patches needed.</div>';
+
+            document.getElementById('remediationContent').innerHTML = `
+                <div class="rem-card">
+                    <div class="rem-title">Crown-jewel risk (known CVEs)</div>
+                    <div class="rem-kpis">
+                        <div><div class="rem-kpi-value" style="color:var(--accent-red)">${before.toFixed(3)}</div><div class="rem-kpi-label">before</div></div>
+                        <div><div class="rem-kpi-value" style="color:var(--accent-green)">${after.toFixed(3)}</div><div class="rem-kpi-label">after ${rem.budget} patches</div></div>
+                        <div><div class="rem-kpi-value" style="color:var(--accent-cyan)">${pct.toFixed(0)}%</div><div class="rem-kpi-label">reduction (${escapeHtml(rem.strategy)})</div></div>
+                    </div>
+                </div>
+                <div class="rem-card">
+                    <div class="rem-title">Recommended patches (apply in order)</div>
+                    ${patches}
+                    <button class="btn-secondary" style="margin-top:10px" onclick="verifyRemediation()">🔁 Verify by re-scan</button>
+                    <div id="verifyResult" style="font-size:12px;margin-top:8px;color:var(--text-secondary)"></div>
+                </div>
+                ${opt ? `<div class="rem-card">
+                    <div class="rem-title">Risk vs. patch budget</div>
+                    ${riskChartSvg(opt)}
+                    <div class="rem-legend">${Object.entries(STRATEGY_STYLE).map(([k, v]) =>
+                        `<span><i style="background:${v.color}"></i>${v.label}</span>`).join('')}</div>
+                </div>` : ''}
+                <div class="rem-card">
+                    <div class="rem-title">Artifacts</div>
+                    <div class="rem-artifact-tabs">
+                        ${['report', 'ansible', 'inventory', 'bash'].map(k =>
+                            `<div class="rem-artifact-tab ${k === remediationArtifact ? 'active' : ''}" onclick="showArtifact('${k}')">${k === 'ansible' ? 'playbook.yml' : k === 'inventory' ? 'inventory.ini' : k === 'bash' ? 'remediate.sh' : 'report'}</div>`).join('')}
+                        <button id="copyPlaybookBtn" class="btn-secondary" onclick="copyPlaybook()">📋 Copy</button>
+                    </div>
+                    <div id="artifactBody" class="remediation-content"></div>
+                </div>`;
+            showArtifact(remediationArtifact);
+        }
+
+        function showArtifact(kind) {
+            remediationArtifact = kind;
+            document.querySelectorAll('.rem-artifact-tab').forEach(t => {
+                const names = { report: 'report', ansible: 'playbook.yml', inventory: 'inventory.ini', bash: 'remediate.sh' };
+                t.classList.toggle('active', t.textContent.trim() === names[kind]);
+            });
+            currentPlaybookText = (remediationData && remediationData[kind]) || '';
+            const body = document.getElementById('artifactBody');
+            if (body) body.textContent = currentPlaybookText;
+        }
+
+        function riskChartSvg(opt) {
+            const W = 360, H = 190, L = 38, R = 10, T = 10, B = 28;
+            const rows = opt.curve;
+            const maxB = rows[rows.length - 1].budget;
+            const yMax = Math.max(opt.baselineRisk * 1.05, 1e-6);
+            const x = b => L + (W - L - R) * (maxB === 0 ? 0 : b / maxB);
+            const y = r => T + (H - T - B) * (1 - r / yMax);
+            let g = '';
+            for (let i = 0; i <= 4; i++) {
+                const v = yMax * i / 4, yy = y(v);
+                g += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="#2a3050" stroke-width="1"/>` +
+                     `<text x="${L - 4}" y="${yy + 3}" fill="#64748b" font-size="9" text-anchor="end">${v.toFixed(2)}</text>`;
+            }
+            rows.forEach(r => {
+                g += `<text x="${x(r.budget)}" y="${H - 12}" fill="#64748b" font-size="9" text-anchor="middle">${r.budget}</text>`;
+            });
+            g += `<text x="${(L + W - R) / 2}" y="${H - 1}" fill="#64748b" font-size="9" text-anchor="middle">patch budget (units)</text>`;
+            // draw thick optimal first so the other lines stay visible on top
+            ['OPTIMAL', 'RANDOM', 'CVSS_FIRST', 'EXPLOIT_PROB_FIRST', 'GREEDY'].forEach(k => {
+                const st = STRATEGY_STYLE[k];
+                const pts = rows.filter(r => r[k] && r[k].risk !== null && r[k].risk !== undefined)
+                                .map(r => `${x(r.budget)},${y(r[k].risk)}`).join(' ');
+                if (pts) g += `<polyline points="${pts}" fill="none" stroke="${st.color}" stroke-width="${st.width}"` +
+                              `${st.dash ? ` stroke-dasharray="${st.dash}"` : ''} stroke-linejoin="round"/>`;
+            });
+            return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Risk versus patch budget">${g}</svg>`;
+        }
+
+        async function verifyRemediation() {
+            const out = document.getElementById('verifyResult');
+            out.textContent = 'Re-scanning patched inventory…';
+            const r = await fetch(`/api/scan/${remediationScanId}/verify?strategy=${remediationData.strategy}&budget=${remediationData.budget}`);
+            if (!r.ok) { out.textContent = 'Verification unavailable.'; return; }
+            const v = await r.json();
+            const agree = Math.abs(v.predictedRisk - v.rescanRisk) < 1e-6;
+            out.innerHTML =
+                `Predicted risk <b>${v.predictedRisk.toFixed(4)}</b> · re-scan risk <b>${v.rescanRisk.toFixed(4)}</b> ` +
+                `<span class="${agree ? 'rem-verify-ok' : 'rem-verify-bad'}">${agree ? '✓ match' : '✗ mismatch'}</span><br>` +
+                `Attack paths: ${v.pathsBefore} → <b>${v.pathsAfter}</b>`;
         }
 
         function copyPlaybook() {
@@ -1302,7 +1437,7 @@
             navigator.clipboard.writeText(currentPlaybookText).then(() => {
                 const btn = document.getElementById('copyPlaybookBtn');
                 btn.innerHTML = '✅ Copied!';
-                setTimeout(() => { btn.innerHTML = '📋 Copy Playbook'; }, 2000);
+                setTimeout(() => { btn.innerHTML = '📋 Copy'; }, 2000);
             });
         }
 

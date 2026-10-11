@@ -19,6 +19,8 @@ netsentinel:
     model-path: /model/exploit_model.json   # Exported gradient-boosted exploitability model
     known-exploited-probability: 0.9        # Floor for CVEs already in CISA KEV
     k-paths: 5               # Number of attack paths to compute
+  remediation:
+    budget: 3                # Patches the automatic remediation plan may use
   graph:
     max-nodes: 500           # Maximum nodes in attack graph
   nvd:

@@ -63,7 +63,7 @@ public class AttackGraphBuilder {
             for (String cpe : fp.cpeStrings()) {
                 List<CveRecord> cves = cveDatabase.findByCpe(cpe);
                 for (CveRecord cve : cves) {
-                    node.addVulnerability(cve);
+                    node.addVulnerability(cve, cpe);
                     totalCves++;
                     log.debug("  ⚡ Matched {} → {} (CVSS {})",
                             fp.hostname(), cve.cveId(), cve.cvssBaseScore());
@@ -83,35 +83,25 @@ public class AttackGraphBuilder {
                 if (source.equals(target)) continue;
 
                 if (canReach(source.getFingerprint().tier(), target.getFingerprint().tier())) {
-                    // Create edges for each vulnerability on the target
-                    if (!target.getVulnerabilities().isEmpty()) {
-                        for (CveRecord cve : target.getVulnerabilities()) {
-                            if (cve.attackVector() == CveRecord.AttackVector.NETWORK) {
-                                ExploitEdge edge = new ExploitEdge(
-                                        "e-" + (edgeCount++),
-                                        cve,
-                                        "TCP",
-                                        target.getFingerprint().openPorts().isEmpty() ? 0 :
-                                                target.getFingerprint().openPorts().get(0),
-                                        cve.exploitabilityScore(),
-                                        "remote"
-                                );
-                                graph.addEdge(source, target, edge);
-                                // Weight = inverse of exploit probability (lower = easier to exploit)
-                                graph.setEdgeWeight(edge, 1.0 - cve.exploitabilityScore() + 0.01);
-                            }
+                    // One edge per distinct network-exploitable CVE on the target. A host with no known
+                    // exploitable vulnerability gets no edge: only evidence-backed exploits are modelled,
+                    // so patching a host can never make it easier to reach.
+                    Set<String> seenCves = new HashSet<>();
+                    for (CveRecord cve : target.getVulnerabilities()) {
+                        if (cve.attackVector() == CveRecord.AttackVector.NETWORK && seenCves.add(cve.cveId())) {
+                            ExploitEdge edge = new ExploitEdge(
+                                    "e-" + (edgeCount++),
+                                    cve,
+                                    "TCP",
+                                    target.getFingerprint().openPorts().isEmpty() ? 0 :
+                                            target.getFingerprint().openPorts().get(0),
+                                    cve.exploitabilityScore(),
+                                    "remote"
+                            );
+                            graph.addEdge(source, target, edge);
+                            // Placeholder weight; CompromiseScorer sets -ln(p) once probabilities are known
+                            graph.setEdgeWeight(edge, 1.0 - cve.exploitabilityScore() + 0.01);
                         }
-                    } else {
-                        // Reachability edge (no known vulnerability)
-                        ExploitEdge edge = new ExploitEdge(
-                                "e-" + (edgeCount++),
-                                null, "TCP",
-                                target.getFingerprint().openPorts().isEmpty() ? 0 :
-                                        target.getFingerprint().openPorts().get(0),
-                                0.1, "network-flow"
-                        );
-                        graph.addEdge(source, target, edge);
-                        graph.setEdgeWeight(edge, 0.9);
                     }
                 }
             }
