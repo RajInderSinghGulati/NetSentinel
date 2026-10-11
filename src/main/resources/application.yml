@@ -20,6 +20,11 @@ netsentinel:
     k-paths: 5               # Number of attack paths to compute
   graph:
     max-nodes: 500           # Maximum nodes in attack graph
+  nvd:
+    enabled: true            # Enable live NVD API v2 CVE lookups
+    api-key: ""              # Optional — increases rate limit from 5 to 50 req/30s
+    timeout-seconds: 3       # Per-request timeout before falling back to simulated DB
+    base-url: https://services.nvd.nist.gov/rest/json/cves/2.0
 
 logging:
   level:

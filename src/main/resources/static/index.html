@@ -606,6 +606,77 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+        /* ═══════════ WEBSOCKET STATUS ═══════════ */
+        .ws-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            transition: all 0.4s;
+        }
+        .ws-connected {
+            background: rgba(16, 185, 129, 0.12);
+            color: var(--accent-green);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+        }
+        .ws-connecting {
+            background: rgba(245, 158, 11, 0.12);
+            color: var(--accent-amber);
+            border: 1px solid rgba(245, 158, 11, 0.25);
+            animation: pulse-badge 1.5s infinite;
+        }
+        .ws-disconnected {
+            background: rgba(239, 68, 68, 0.12);
+            color: var(--accent-red);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+        }
+
+        /* ═══════════ COPY BUTTON ═══════════ */
+        .btn-secondary {
+            padding: 6px 14px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-secondary);
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 12px;
+        }
+        .btn-secondary:hover {
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+
+        /* ═══════════ EDGE TOOLTIP ═══════════ */
+        .edge-tooltip {
+            position: fixed;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-primary);
+            pointer-events: none;
+            z-index: 9999;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            max-width: 280px;
+            line-height: 1.5;
+            display: none;
+        }
+        .edge-tooltip .tt-cve { color: var(--accent-amber); font-weight: 700; }
+        .edge-tooltip .tt-prob { color: var(--accent-red); }
+        .edge-tooltip .tt-label { color: var(--text-muted); font-size: 10px; }
     </style>
 </head>
 <body>
@@ -622,6 +693,10 @@
             </div>
         </div>
         <div class="header-controls">
+            <div id="wsBadge" class="ws-badge ws-connecting">
+                <span class="dot" id="wsDot" style="background:var(--accent-amber);"></span>
+                <span id="wsText">Connecting...</span>
+            </div>
             <div id="statusBadge" class="status-badge status-idle">
                 <span class="dot dot-idle" id="statusDot"></span>
                 <span id="statusText">Ready</span>
@@ -708,13 +783,16 @@
                     <div id="nodeDetails"></div>
                 </div>
 
-                <!-- Remediation Tab -->
+        <!-- Remediation Tab -->
                 <div id="tab-remediation" class="tab-section">
                     <div class="empty-state" id="remediationEmpty">
                         <div class="empty-state-icon">🔧</div>
                         <div class="empty-state-title">No Playbook</div>
                         <div class="empty-state-desc">Complete a scan to generate automated Ansible playbooks and hardening scripts.</div>
                     </div>
+                    <button id="copyPlaybookBtn" class="btn-secondary" onclick="copyPlaybook()" style="display:none;">
+                        📋 Copy Playbook
+                    </button>
                     <div id="remediationContent"></div>
                 </div>
 
@@ -730,6 +808,9 @@
                 </div>
             </div>
         </div>
+        <!-- Edge Tooltip -->
+        <div id="edgeTooltip" class="edge-tooltip"></div>
+
     </div>
 
     <script>
@@ -742,6 +823,90 @@
         let graphData = null;
         let attackPaths = [];
         let selectedPathId = null;
+        let stompClient = null;
+        let scanProgressSub = null;
+        let scanEventsSub = null;
+        let currentPlaybookText = '';
+
+        // ═══════════ WEBSOCKET / STOMP ═══════════
+
+        function connectWebSocket() {
+            setWsStatus('connecting');
+            const socket = new SockJS('/ws');
+            stompClient = new StompJs.Client({
+                webSocketFactory: () => socket,
+                reconnectDelay: 5000,
+                onConnect: () => {
+                    setWsStatus('connected');
+                    addLog('info', 'WebSocket STOMP connected — real-time events active');
+
+                    // Subscribe to pipeline progress events
+                    stompClient.subscribe('/topic/scan-progress', msg => {
+                        const data = JSON.parse(msg.body);
+                        handleProgressEvent(data);
+                    });
+
+                    // Subscribe to granular discovery events
+                    stompClient.subscribe('/topic/scan-events', msg => {
+                        const data = JSON.parse(msg.body);
+                        handleScanEvent(data);
+                    });
+                },
+                onDisconnect: () => {
+                    setWsStatus('disconnected');
+                    addLog('info', 'WebSocket disconnected — will auto-reconnect');
+                },
+                onStompError: (frame) => {
+                    setWsStatus('disconnected');
+                    addLog('info', `WebSocket error: ${frame.headers?.message || 'unknown'}`);
+                }
+            });
+            stompClient.activate();
+        }
+
+        function setWsStatus(state) {
+            const badge = document.getElementById('wsBadge');
+            const dot = document.getElementById('wsDot');
+            const text = document.getElementById('wsText');
+            badge.className = 'ws-badge ws-' + state;
+            const colors = { connected: 'var(--accent-green)', connecting: 'var(--accent-amber)', disconnected: 'var(--accent-red)' };
+            const labels = { connected: '⬤ WS Live', connecting: '⬤ Connecting', disconnected: '⬤ WS Off' };
+            dot.style.background = colors[state] || colors.disconnected;
+            text.textContent = labels[state] || 'WS Off';
+        }
+
+        function handleProgressEvent(data) {
+            const statusMap = {
+                'SCANNING':  { state: 'scanning', text: `Tier 1: Scanning...` },
+                'ENRICHING': { state: 'scanning', text: `Tier 2: CVE Matching...` },
+                'GRAPHING':  { state: 'scanning', text: `Tier 2: Building Graph...` },
+                'ANALYZING': { state: 'scanning', text: `Tier 3: AI Scoring...` },
+                'COMPLETE':  { state: 'complete', text: `Done (${data.durationMs}ms)` },
+                'FAILED':    { state: 'idle',     text: `Failed` }
+            };
+            const s = statusMap[data.status];
+            if (s) setStatus(s.state, s.text);
+
+            if (data.status === 'COMPLETE' && data.scanId) {
+                // Pipeline done — fetch all results
+                fetchAndRenderResults(data.scanId);
+            }
+            if (data.status === 'FAILED') {
+                document.getElementById('scanBtn').disabled = false;
+                document.getElementById('scanBtn').innerHTML = '⚡ Launch Scan';
+            }
+        }
+
+        function handleScanEvent(data) {
+            const type = data.type;
+            if (type === 'host-discovered') {
+                addLog('host', `${data.hostname} (${data.ip}) — ${data.tier} | ${data.ports} ports`);
+            } else if (type === 'attack-path-found') {
+                addLog('path', `Path found: Risk=${parseFloat(data.risk).toFixed(4)} | ${(data.hops||[]).join(' → ')} | Bottleneck: ${data.bottleneck}`);
+            } else if (type === 'cve-enrichment-complete') {
+                addLog('info', `CVE enrichment: ${data.totalCves} CVEs matched → ${data.graphNodes} nodes, ${data.graphEdges} edges`);
+            }
+        }
 
         // ═══════════ INITIALIZE CYTOSCAPE ═══════════
         function initCytoscape() {
@@ -820,7 +985,7 @@
                 maxZoom: 3
             });
 
-            // Node click handler
+            // Node click → details panel
             cy.on('tap', 'node', function(evt) {
                 showNodeDetails(evt.target.data());
                 switchTab('details');
@@ -832,6 +997,32 @@
                     document.getElementById('detailsEmpty').style.display = 'block';
                 }
             });
+
+            // ── Edge hover tooltips ──
+            const tooltip = document.getElementById('edgeTooltip');
+
+            cy.on('mouseover', 'edge', function(evt) {
+                const d = evt.target.data();
+                const cveLabel = d.cve
+                    ? `<div class="tt-cve">${d.cve}</div><div class="tt-label">CVSS ${d.cvss || '—'}</div>`
+                    : '<div class="tt-label">Reachability edge (no CVE)</div>';
+                tooltip.innerHTML = `
+                    ${cveLabel}
+                    <div><span class="tt-label">P(exploit): </span><span class="tt-prob">${(d.exploitProb || 0).toFixed(3)}</span></div>
+                    <div><span class="tt-label">Protocol: </span>${d.protocol || 'TCP'} :${d.port || '?'}</div>
+                `;
+                tooltip.style.display = 'block';
+            });
+
+            cy.on('mousemove', 'edge', function(evt) {
+                const e = evt.originalEvent;
+                tooltip.style.left = (e.clientX + 14) + 'px';
+                tooltip.style.top  = (e.clientY - 10) + 'px';
+            });
+
+            cy.on('mouseout', 'edge', function() {
+                tooltip.style.display = 'none';
+            });
         }
 
         // ═══════════ LAUNCH SCAN ═══════════
@@ -840,61 +1031,111 @@
             const btn = document.getElementById('scanBtn');
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span> Scanning...';
-            setStatus('scanning', 'Scanning...');
-            addLog('info', `Initiating scan of ${cidr}...`);
+            setStatus('scanning', 'Initiating...');
+            addLog('info', `Initiating async scan of ${cidr}...`);
+            switchTab('logs');
 
+            // Clear previous graph
+            if (cy) cy.elements().remove();
+            document.getElementById('pathsList').innerHTML = '';
+            document.getElementById('pathsEmpty').style.display = 'block';
+            document.getElementById('graphStats').style.display = 'none';
+            document.getElementById('graphLegend').style.display = 'none';
+
+            try {
+                // Use async endpoint — STOMP will stream progress
+                const response = await fetch('/api/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cidr })
+                });
+                const result = await response.json();
+                currentScanId = result.scanId;
+                addLog('info', `Scan ${result.scanId} started — streaming events via WebSocket...`);
+
+                // If WebSocket is unavailable, fall back to polling the sync result
+                if (!stompClient || !stompClient.connected) {
+                    addLog('info', 'WebSocket unavailable — falling back to sync API');
+                    await fallbackSyncScan(cidr, btn);
+                }
+                // Otherwise results arrive via STOMP → handleProgressEvent → fetchAndRenderResults
+
+            } catch (err) {
+                addLog('info', `Error: ${err.message}`);
+                setStatus('idle', 'Error');
+                btn.disabled = false;
+                btn.innerHTML = '⚡ Launch Scan';
+            }
+        }
+
+        async function fallbackSyncScan(cidr, btn) {
             try {
                 const response = await fetch('/api/scan/sync', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ cidr })
                 });
-
                 const result = await response.json();
                 currentScanId = result.scanId;
                 addLog('info', `Scan ${result.scanId} complete — ${result.hostsDiscovered} hosts, ${result.cvesMatched} CVEs`);
+                await fetchAndRenderResults(result.scanId, result);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '⚡ Launch Scan';
+            }
+        }
 
-                // Fetch graph data
-                await loadGraphData(result.scanId);
-                await loadAttackPaths(result.scanId);
-                await loadRemediation(result.scanId);
+        // ═══════════ FETCH & RENDER ALL RESULTS ═══════════
+        async function fetchAndRenderResults(scanId, summaryData) {
+            const btn = document.getElementById('scanBtn');
+            try {
+                // Fetch graph data (single source of truth — used for both graph + attack paths)
+                const graphResponse = await fetch(`/api/scan/${scanId}/graph`);
+                const data = await graphResponse.json();
+                graphData = data;
 
-                setStatus('complete', `Done (${result.durationMs}ms)`);
+                renderGraph(data);
 
-                // Update stats
-                document.getElementById('statNodes').textContent = result.graphNodes;
-                document.getElementById('statEdges').textContent = result.graphEdges;
-                document.getElementById('statCves').textContent = result.cvesMatched;
-                document.getElementById('statPaths').textContent = result.attackPaths;
-                document.getElementById('statRisk').textContent = result.highestRisk.toFixed(4);
+                // Attack paths come from within graphData — no second fetch needed
+                attackPaths = data.attackPaths || [];
+                renderAttackPaths(attackPaths);
+                attackPaths.forEach(p => {
+                    const bn = p.bottleneck ? p.bottleneck.cveId : 'none';
+                    addLog('path', `Path #${p.pathId}: Risk=${p.risk.toFixed(4)} | ${p.hops.join(' → ')} | Bottleneck: ${bn}`);
+                });
+
+                // Remediation
+                await loadRemediation(scanId);
+
+                // Update stat chips — use summaryData if passed, otherwise compute from graphData
+                const nodes = (data.elements || []).filter(e => e.group === 'nodes').length;
+                const edges = (data.elements || []).filter(e => e.group === 'edges').length;
+                const cves  = (data.elements || []).filter(e => e.group === 'nodes')
+                                .reduce((acc, n) => acc + (n.data.vulnCount || 0), 0);
+                const maxRisk = attackPaths.length > 0 ? Math.max(...attackPaths.map(p => p.risk)) : 0;
+
+                document.getElementById('statNodes').textContent = summaryData?.graphNodes ?? nodes;
+                document.getElementById('statEdges').textContent = summaryData?.graphEdges ?? edges;
+                document.getElementById('statCves').textContent  = summaryData?.cvesMatched ?? cves;
+                document.getElementById('statPaths').textContent = attackPaths.length;
+                document.getElementById('statRisk').textContent  = maxRisk.toFixed(4);
                 document.getElementById('graphStats').style.display = 'flex';
                 document.getElementById('graphLegend').style.display = 'flex';
 
-            } catch (err) {
-                addLog('info', `Error: ${err.message}`);
-                setStatus('idle', 'Error');
+                if (summaryData) {
+                    setStatus('complete', `Done (${summaryData.durationMs}ms)`);
+                }
+
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '⚡ Launch Scan';
             }
-
-            btn.disabled = false;
-            btn.innerHTML = '⚡ Launch Scan';
         }
 
-        // ═══════════ LOAD GRAPH DATA ═══════════
-        async function loadGraphData(scanId) {
-            const response = await fetch(`/api/scan/${scanId}/graph`);
-            const data = await response.json();
-            graphData = data;
-            renderGraph(data);
-        }
-
+        // ═══════════ GRAPH RENDERING ═══════════
         function renderGraph(data) {
             cy.elements().remove();
-
-            // Add elements
-            const elements = data.elements || [];
-            cy.add(elements);
-
-            // Apply dagre layout for hierarchical display
+            cy.add(data.elements || []);
             cy.layout({
                 name: 'dagre',
                 rankDir: 'LR',
@@ -907,8 +1148,7 @@
                 animationEasing: 'ease-out-cubic'
             }).run();
 
-            // Log node discoveries
-            elements.filter(e => e.group === 'nodes').forEach(el => {
+            (data.elements || []).filter(e => e.group === 'nodes').forEach(el => {
                 const d = el.data;
                 if (d.tier !== 'EXTERNAL') {
                     addLog('host', `${d.label} (${d.ip}) — ${d.tier} | ${d.vulnCount} CVEs | Risk: ${d.riskScore}`);
@@ -916,30 +1156,16 @@
             });
         }
 
-        // ═══════════ LOAD ATTACK PATHS ═══════════
-        async function loadAttackPaths(scanId) {
-            const response = await fetch(`/api/scan/${scanId}/graph`);
-            const data = await response.json();
-            attackPaths = data.attackPaths || [];
-            renderAttackPaths(attackPaths);
-
-            attackPaths.forEach(p => {
-                const bn = p.bottleneck ? p.bottleneck.cveId : 'none';
-                addLog('path', `Path #${p.pathId}: Risk=${p.risk} | ${p.hops.join(' → ')} | Bottleneck: ${bn}`);
-            });
-        }
-
+        // ═══════════ ATTACK PATHS ═══════════
         function renderAttackPaths(paths) {
             const container = document.getElementById('pathsList');
             const emptyState = document.getElementById('pathsEmpty');
-
             if (paths.length === 0) {
                 emptyState.style.display = 'block';
                 container.innerHTML = '';
                 return;
             }
             emptyState.style.display = 'none';
-
             container.innerHTML = paths.map(p => {
                 const riskClass = p.risk > 0.1 ? 'risk-critical' : p.risk > 0.01 ? 'risk-high' : 'risk-medium';
                 const hopsHtml = p.hops.map(h => `<span class="hop">${h}</span>`).join('<span class="arrow">→</span>');
@@ -948,9 +1174,8 @@
                         <span class="cve-tag cve-${p.bottleneck.severity.toLowerCase()}">${p.bottleneck.cveId}</span>
                         <span style="color:var(--text-muted);font-size:10px;">CVSS ${p.bottleneck.cvss} — ${p.bottleneck.description.substring(0, 80)}...</span>
                     </div>` : '';
-
                 return `
-                    <div class="attack-path-card animate-in ${selectedPathId === p.pathId ? 'active' : ''}" 
+                    <div class="attack-path-card animate-in ${selectedPathId === p.pathId ? 'active' : ''}"
                          onclick="highlightPath(${p.pathId})" data-path-id="${p.pathId}">
                         <div class="path-header">
                             <span class="path-rank">⚔ Attack Path #${p.pathId}</span>
@@ -965,22 +1190,18 @@
         // ═══════════ HIGHLIGHT PATH ═══════════
         function highlightPath(pathId) {
             if (selectedPathId === pathId) {
-                // Deselect
                 selectedPathId = null;
                 cy.elements().removeClass('highlighted-path-node highlighted-path-edge dimmed');
                 renderAttackPaths(attackPaths);
                 return;
             }
-
             selectedPathId = pathId;
             const path = attackPaths.find(p => p.pathId === pathId);
             if (!path) return;
 
-            // Dim everything
             cy.elements().addClass('dimmed');
             cy.elements().removeClass('highlighted-path-node highlighted-path-edge');
 
-            // Highlight path nodes
             path.hops.forEach(hostname => {
                 cy.nodes().filter(n => n.data('label') === hostname).forEach(n => {
                     n.removeClass('dimmed');
@@ -988,7 +1209,6 @@
                 });
             });
 
-            // Highlight path edges
             if (path.edges) {
                 path.edges.forEach(edgeId => {
                     cy.edges().filter(e => e.data('id') === edgeId).forEach(e => {
@@ -997,7 +1217,6 @@
                     });
                 });
             }
-
             renderAttackPaths(attackPaths);
         }
 
@@ -1005,7 +1224,6 @@
         function showNodeDetails(nodeData) {
             const container = document.getElementById('nodeDetails');
             document.getElementById('detailsEmpty').style.display = 'none';
-
             const tierColors = {
                 'EXTERNAL': '#ef4444', 'DMZ': '#f59e0b',
                 'APPLICATION': '#3b82f6', 'DATA': '#8b5cf6', 'CROWN_JEWEL': '#ec4899'
@@ -1013,7 +1231,6 @@
             const tierIcons = {
                 'EXTERNAL': '🌐', 'DMZ': '🛡', 'APPLICATION': '⚙️', 'DATA': '💾', 'CROWN_JEWEL': '👑'
             };
-
             const vulns = (nodeData.vulnerabilities || []).map(v => {
                 const sevClass = v.severity === 'CRITICAL' ? 'cve-critical' :
                                  v.severity === 'HIGH' ? 'cve-high' : 'cve-medium';
@@ -1026,7 +1243,6 @@
                         <div class="vuln-desc">${v.description.substring(0, 120)}...</div>
                     </div>`;
             }).join('');
-
             container.innerHTML = `
                 <div class="node-detail-card animate-in">
                     <div class="node-detail-header">
@@ -1070,14 +1286,24 @@
                 </div>`;
         }
 
-        // ═══════════ LOAD REMEDIATION ═══════════
+        // ═══════════ REMEDIATION ═══════════
         async function loadRemediation(scanId) {
             const response = await fetch(`/api/scan/${scanId}/remediation`);
             const data = await response.json();
-
+            currentPlaybookText = data.playbook || '';
             document.getElementById('remediationEmpty').style.display = 'none';
+            document.getElementById('copyPlaybookBtn').style.display = 'flex';
             document.getElementById('remediationContent').innerHTML =
-                `<div class="remediation-content">${escapeHtml(data.playbook)}</div>`;
+                `<div class="remediation-content">${escapeHtml(currentPlaybookText)}</div>`;
+        }
+
+        function copyPlaybook() {
+            if (!currentPlaybookText) return;
+            navigator.clipboard.writeText(currentPlaybookText).then(() => {
+                const btn = document.getElementById('copyPlaybookBtn');
+                btn.innerHTML = '✅ Copied!';
+                setTimeout(() => { btn.innerHTML = '📋 Copy Playbook'; }, 2000);
+            });
         }
 
         // ═══════════ UTILITIES ═══════════
@@ -1085,7 +1311,6 @@
             const badge = document.getElementById('statusBadge');
             const dot = document.getElementById('statusDot');
             const label = document.getElementById('statusText');
-
             badge.className = 'status-badge status-' + state;
             dot.className = 'dot dot-' + state;
             label.textContent = text;
@@ -1102,14 +1327,11 @@
             const feed = document.getElementById('logFeed');
             const time = new Date().toLocaleTimeString('en-US', { hour12: false });
             const typeLabel = { host: 'HOST', cve: 'CVE', path: 'PATH', info: 'SYS' }[type] || 'SYS';
-            
             const entry = document.createElement('div');
             entry.className = 'log-entry animate-in';
             entry.innerHTML = `<span class="log-time">${time}</span><span class="log-type log-type-${type}">[${typeLabel}]</span> ${escapeHtml(message)}`;
             feed.insertBefore(entry, feed.firstChild);
-
-            // Keep log manageable
-            while (feed.children.length > 100) {
+            while (feed.children.length > 150) {
                 feed.removeChild(feed.lastChild);
             }
         }
@@ -1123,6 +1345,7 @@
         // ═══════════ INIT ═══════════
         document.addEventListener('DOMContentLoaded', () => {
             initCytoscape();
+            connectWebSocket();
         });
     </script>
 </body>

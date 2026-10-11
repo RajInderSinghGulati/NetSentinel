@@ -16,7 +16,7 @@ import java.util.stream.Collectors;
  * <p>In production, this would be replaced by an NVD REST API client
  * using Java 21 {@code HttpClient} with async queries.</p>
  */
-@Component
+@Component("simulatedCveDb")
 public class SimulatedCveDatabase implements CveDatabase {
 
     private static final Logger log = LoggerFactory.getLogger(SimulatedCveDatabase.class);

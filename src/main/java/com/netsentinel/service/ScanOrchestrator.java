@@ -3,6 +3,7 @@ package com.netsentinel.service;
 import com.netsentinel.ai.AttackPathAnalyzer;
 import com.netsentinel.ai.CompromiseScorer;
 import com.netsentinel.ai.RemediationGenerator;
+import com.netsentinel.cve.HybridCveDatabase;
 import com.netsentinel.graph.AttackGraphBuilder;
 import com.netsentinel.graph.AttackGraphBuilder.AttackGraphResult;
 import com.netsentinel.model.*;
@@ -38,6 +39,7 @@ public class ScanOrchestrator {
     private final AttackPathAnalyzer pathAnalyzer;
     private final RemediationGenerator remediationGenerator;
     private final SimpMessagingTemplate messagingTemplate;
+    private final HybridCveDatabase hybridCveDatabase;
 
     private final Map<String, ScanResult> scans = new ConcurrentHashMap<>();
     private final Map<String, AttackGraphResult> graphResults = new ConcurrentHashMap<>();
@@ -47,13 +49,15 @@ public class ScanOrchestrator {
                             CompromiseScorer compromiseScorer,
                             AttackPathAnalyzer pathAnalyzer,
                             RemediationGenerator remediationGenerator,
-                            SimpMessagingTemplate messagingTemplate) {
+                            SimpMessagingTemplate messagingTemplate,
+                            HybridCveDatabase hybridCveDatabase) {
         this.networkScanner = networkScanner;
         this.graphBuilder = graphBuilder;
         this.compromiseScorer = compromiseScorer;
         this.pathAnalyzer = pathAnalyzer;
         this.remediationGenerator = remediationGenerator;
         this.messagingTemplate = messagingTemplate;
+        this.hybridCveDatabase = hybridCveDatabase;
     }
 
     /**
@@ -104,6 +108,14 @@ public class ScanOrchestrator {
 
             log.info("  Tier 2 complete: {} nodes, {} edges, {} CVEs",
                     result.getGraphNodeCount(), result.getGraphEdgeCount(), result.getTotalCvesMatched());
+            log.info("  {}", hybridCveDatabase.getSessionStats());
+
+            // Broadcast CVE enrichment summary
+            broadcastEvent("cve-enrichment-complete", Map.of(
+                    "totalCves", graphResult.totalCvesMatched(),
+                    "graphNodes", graphResult.graph().vertexSet().size(),
+                    "graphEdges", graphResult.graph().edgeSet().size()
+            ));
 
             // ════════════════════════════════════════
             // TIER 3: AI Scoring & Path Analysis
