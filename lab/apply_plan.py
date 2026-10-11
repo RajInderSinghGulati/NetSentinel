@@ -36,7 +36,10 @@ def get(url):
 
 
 def image_exists(image, attempts=3):
-    """True/False from the registry; raises if it could not be reached (never guesses 'missing')."""
+    """True if the image is already local; otherwise ask the registry (raises if it cannot be reached;
+    never guesses 'missing')."""
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0:
+        return True
     last = "no answer"
     for i in range(attempts):
         try:
@@ -58,7 +61,7 @@ def main():
     ap.add_argument("--scan-id", required=True)
     ap.add_argument("--strategy", default="OPTIMAL")
     ap.add_argument("--budget", type=int, default=3)
-    ap.add_argument("--base-url", default="http://localhost:8080")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8080")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 

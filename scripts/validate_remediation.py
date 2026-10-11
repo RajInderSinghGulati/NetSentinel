@@ -64,7 +64,7 @@ def docker_ready():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base-url", default="http://localhost:8080")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8080")
     ap.add_argument("--scan-id")
     ap.add_argument("--no-docker", action="store_true")
     ap.add_argument("--strategy", help="e.g. CVSS_FIRST; default = the plan chosen during the scan")

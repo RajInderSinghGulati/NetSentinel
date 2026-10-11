@@ -70,6 +70,8 @@ mvn clean test                       # 45 tests, about 30 s
 mvn spring-boot:run                  # dashboard at http://localhost:8080 (loopback only)
 ```
 
+To present it, follow [docs/DEMO.md](docs/DEMO.md) (one-command start: `scripts/demo_start.ps1`).
+
 Simulated scan:
 
 ```bash
