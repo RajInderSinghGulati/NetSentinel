@@ -43,6 +43,10 @@ public class NvdApiClient {
     @Value("${netsentinel.nvd.api-key:}")
     private String apiKey;
 
+    /** Results per request; the NVD maximum is 2000. A small page silently drops CVEs. */
+    @Value("${netsentinel.nvd.page-size:2000}")
+    private int pageSize;
+
     @Value("${netsentinel.nvd.timeout-seconds:3}")
     private int timeoutSeconds;
 
@@ -67,7 +71,7 @@ public class NvdApiClient {
      */
     public CompletableFuture<List<CveRecord>> fetchByCpe(String cpeString) {
         String encodedCpe = URLEncoder.encode(cpeString, StandardCharsets.UTF_8);
-        String url = baseUrl + "?cpeName=" + encodedCpe + "&resultsPerPage=5";
+        String url = baseUrl + "?cpeName=" + encodedCpe + "&resultsPerPage=" + pageSize;
 
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -103,7 +107,7 @@ public class NvdApiClient {
     /**
      * Parses the NVD API v2 JSON response body into CveRecord instances.
      */
-    private List<CveRecord> parseNvdResponse(String json, String sourceCpe) {
+    public List<CveRecord> parseNvdResponse(String json, String sourceCpe) {
         List<CveRecord> results = new ArrayList<>();
         try {
             JsonNode root = objectMapper.readTree(json);
@@ -143,7 +147,11 @@ public class NvdApiClient {
         for (String metricKey : List.of("cvssMetricV31", "cvssMetricV30")) {
             JsonNode metricArray = cveNode.path("metrics").path(metricKey);
             if (metricArray.isArray() && metricArray.size() > 0) {
-                cvssData = metricArray.get(0).path("cvssData");
+                JsonNode chosen = metricArray.get(0);
+                for (JsonNode m : metricArray) {
+                    if ("Primary".equals(m.path("type").asText())) { chosen = m; break; }
+                }
+                cvssData = chosen.path("cvssData");
                 break;
             }
         }
@@ -153,6 +161,7 @@ public class NvdApiClient {
         AttackComplexity attackComplexity = AttackComplexity.LOW;
         PrivilegesRequired privilegesRequired = PrivilegesRequired.NONE;
         UserInteraction userInteraction = UserInteraction.NONE;
+        String scope = "UNCHANGED", confImpact = "LOW", integImpact = "LOW", availImpact = "LOW";
 
         if (cvssData != null && !cvssData.isMissingNode()) {
             baseScore = cvssData.path("baseScore").asDouble(4.0);
@@ -162,15 +171,23 @@ public class NvdApiClient {
             privilegesRequired = parsePrivilegesRequired(cvssData.path("privilegesRequired").asText("NONE"));
             userInteraction = "NONE".equals(cvssData.path("userInteraction").asText("NONE"))
                     ? UserInteraction.NONE : UserInteraction.REQUIRED;
+            scope = cvssData.path("scope").asText(scope);
+            confImpact = cvssData.path("confidentialityImpact").asText(confImpact);
+            integImpact = cvssData.path("integrityImpact").asText(integImpact);
+            availImpact = cvssData.path("availabilityImpact").asText(availImpact);
         }
 
-        // Extract CWE
-        String cweId = "CWE-UNKNOWN";
-        JsonNode weaknesses = cveNode.path("weaknesses");
-        if (weaknesses.isArray() && weaknesses.size() > 0) {
-            for (JsonNode desc : weaknesses.get(0).path("description")) {
-                cweId = desc.path("value").asText(cweId);
-                break;
+        // Extract CWE: first "CWE-*" value across all weakness entries (same rule as
+        // scripts/build_dataset.py, so inference features match training features)
+        String cweId = "NVD-CWE-noinfo";
+        cwe:
+        for (JsonNode weakness : cveNode.path("weaknesses")) {
+            for (JsonNode desc : weakness.path("description")) {
+                String v = desc.path("value").asText("");
+                if (v.startsWith("CWE-")) {
+                    cweId = v;
+                    break cwe;
+                }
             }
         }
 
@@ -178,10 +195,21 @@ public class NvdApiClient {
         boolean exploitInWild = !cveNode.path("cisaExploitAdd").asText("").isBlank();
         boolean patchAvailable = !"Awaiting Analysis".equals(cveNode.path("vulnStatus").asText(""));
 
+        // Affected CPEs: prefer NVD configuration data (version ranges encoded by CpeMatcher);
+        // fall back to the CPE we queried with.
+        List<String> affected = CpeMatcher.extractAffected(cveNode);
+        if (affected.isEmpty() && sourceCpe != null) affected = List.of(sourceCpe);
+
+        String published = cveNode.path("published").asText("");
+        int year = published.length() >= 4 ? Integer.parseInt(published.substring(0, 4))
+                : CveRecord.yearFromId(cveId);
+
         return new CveRecord(
                 cveId, description, baseScore,
                 attackVector, attackComplexity, privilegesRequired, userInteraction,
-                cweId, List.of(sourceCpe), patchAvailable, exploitInWild
+                cweId, affected, patchAvailable, exploitInWild,
+                year, CveRecord.vendorFromCpes(affected),
+                scope, confImpact, integImpact, availImpact
         );
     }
 

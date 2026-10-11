@@ -1,0 +1,37 @@
+# Declared assets for live scans of the lab (scan target "lab").
+# A scan sees ports and banners, not an asset's role, so tier and criticality are declared here.
+hosts:
+  - name: web-dmz
+    address: 127.0.0.1
+    ports: [18080]
+    tier: DMZ
+    criticality: 5
+    os: Alpine Linux
+
+  - name: proxy-dmz
+    address: 127.0.0.1
+    ports: [18081]
+    tier: DMZ
+    criticality: 4
+    os: Alpine Linux
+
+  - name: app-cache
+    address: 127.0.0.1
+    ports: [18379]
+    tier: APPLICATION
+    criticality: 6
+    os: Alpine Linux
+
+  - name: data-memcached
+    address: 127.0.0.1
+    ports: [18211]
+    tier: DATA
+    criticality: 7
+    os: Alpine Linux
+
+  - name: secrets-vault
+    address: 127.0.0.1
+    ports: [18380]
+    tier: CROWN_JEWEL
+    criticality: 10
+    os: Alpine Linux

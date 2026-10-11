@@ -13,7 +13,8 @@ import org.springframework.scheduling.annotation.EnableAsync;
  * automated remediation playbooks.</p>
  *
  * <p>Built natively on Java 21 LTS with Project Loom virtual threads,
- * JGraphT for graph analysis, and Deeplearning4j for JVM-native AI.</p>
+ * JGraphT for graph analysis, and a gradient-boosted exploitability model trained offline
+ * and evaluated in plain Java.</p>
  */
 @SpringBootApplication
 @EnableAsync
@@ -35,7 +36,7 @@ public class NetSentinelApplication {
             ║                    ╩ ╩╩                                     ║
             ║                                                            ║
             ║   Autonomous Network Vulnerability Assessment Engine       ║
-            ║   Java 21 LTS | Spring Boot 3.2 | JGraphT | DL4J          ║
+            ║   Java 21 LTS | Spring Boot 3.2 | JGraphT | GBT model     ║
             ║                                                            ║
             ╚══════════════════════════════════════════════════════════════╝
             """);

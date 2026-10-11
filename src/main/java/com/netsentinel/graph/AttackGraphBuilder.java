@@ -36,6 +36,10 @@ public class AttackGraphBuilder {
 
     private final CveDatabase cveDatabase;
 
+    /** One edge per (source, target, CVE) grows quadratically with hosts; fail clearly instead of running out of memory. */
+    @org.springframework.beans.factory.annotation.Value("${netsentinel.graph.max-edges:3000000}")
+    private long maxEdges;
+
     public AttackGraphBuilder(CveDatabase cveDatabase) {
         this.cveDatabase = cveDatabase;
     }
@@ -46,6 +50,22 @@ public class AttackGraphBuilder {
      * @param fingerprints List of discovered host fingerprints from Tier 1
      * @return The constructed attack graph with CVE-enriched nodes and weighted edges
      */
+    /**
+     * Nodes only: hosts enriched with their matched CVEs, without any edges. Enough for
+     * {@code RiskModel.compileImplicit}, which derives reachability from the tier rules directly.
+     */
+    public List<HostNode> buildNodes(List<HostFingerprint> fingerprints) {
+        List<HostNode> nodes = new ArrayList<>();
+        for (HostFingerprint fp : fingerprints) {
+            HostNode node = new HostNode(fp.ip(), fp);
+            for (String cpe : fp.cpeStrings()) {
+                for (CveRecord cve : cveDatabase.findByCpe(cpe)) node.addVulnerability(cve, cpe);
+            }
+            nodes.add(node);
+        }
+        return nodes;
+    }
+
     public AttackGraphResult buildGraph(List<HostFingerprint> fingerprints) {
         log.info("▶ Building attack graph from {} discovered hosts", fingerprints.size());
 
@@ -63,7 +83,7 @@ public class AttackGraphBuilder {
             for (String cpe : fp.cpeStrings()) {
                 List<CveRecord> cves = cveDatabase.findByCpe(cpe);
                 for (CveRecord cve : cves) {
-                    node.addVulnerability(cve);
+                    node.addVulnerability(cve, cpe);
                     totalCves++;
                     log.debug("  ⚡ Matched {} → {} (CVSS {})",
                             fp.hostname(), cve.cveId(), cve.cvssBaseScore());
@@ -83,35 +103,30 @@ public class AttackGraphBuilder {
                 if (source.equals(target)) continue;
 
                 if (canReach(source.getFingerprint().tier(), target.getFingerprint().tier())) {
-                    // Create edges for each vulnerability on the target
-                    if (!target.getVulnerabilities().isEmpty()) {
-                        for (CveRecord cve : target.getVulnerabilities()) {
-                            if (cve.attackVector() == CveRecord.AttackVector.NETWORK) {
-                                ExploitEdge edge = new ExploitEdge(
-                                        "e-" + (edgeCount++),
-                                        cve,
-                                        "TCP",
-                                        target.getFingerprint().openPorts().isEmpty() ? 0 :
-                                                target.getFingerprint().openPorts().get(0),
-                                        cve.exploitabilityScore(),
-                                        "remote"
-                                );
-                                graph.addEdge(source, target, edge);
-                                // Weight = inverse of exploit probability (lower = easier to exploit)
-                                graph.setEdgeWeight(edge, 1.0 - cve.exploitabilityScore() + 0.01);
+                    // One edge per distinct network-exploitable CVE on the target. A host with no known
+                    // exploitable vulnerability gets no edge: only evidence-backed exploits are modelled,
+                    // so patching a host can never make it easier to reach.
+                    Set<String> seenCves = new HashSet<>();
+                    for (CveRecord cve : target.getVulnerabilities()) {
+                        if (cve.attackVector() == CveRecord.AttackVector.NETWORK && seenCves.add(cve.cveId())) {
+                            ExploitEdge edge = new ExploitEdge(
+                                    "e-" + (edgeCount++),
+                                    cve,
+                                    "TCP",
+                                    target.getFingerprint().openPorts().isEmpty() ? 0 :
+                                            target.getFingerprint().openPorts().get(0),
+                                    cve.exploitabilityScore(),
+                                    "remote"
+                            );
+                            graph.addEdge(source, target, edge);
+                            if (edgeCount > maxEdges) {
+                                throw new IllegalStateException("attack graph exceeds " + maxEdges + " edges ("
+                                        + fingerprints.size() + " hosts); raise netsentinel.graph.max-edges, scan a smaller scope, "
+                                        + "or use the graph-free risk model (RiskModel.compileImplicit)");
                             }
+                            // Placeholder weight; CompromiseScorer sets -ln(p) once probabilities are known
+                            graph.setEdgeWeight(edge, 1.0 - cve.exploitabilityScore() + 0.01);
                         }
-                    } else {
-                        // Reachability edge (no known vulnerability)
-                        ExploitEdge edge = new ExploitEdge(
-                                "e-" + (edgeCount++),
-                                null, "TCP",
-                                target.getFingerprint().openPorts().isEmpty() ? 0 :
-                                        target.getFingerprint().openPorts().get(0),
-                                0.1, "network-flow"
-                        );
-                        graph.addEdge(source, target, edge);
-                        graph.setEdgeWeight(edge, 0.9);
                     }
                 }
             }
@@ -127,7 +142,7 @@ public class AttackGraphBuilder {
      * Determines if network traffic can flow from source tier to target tier.
      * Models enterprise firewall segmentation rules.
      */
-    private boolean canReach(NetworkTier source, NetworkTier target) {
+    public static boolean canReach(NetworkTier source, NetworkTier target) {
         return switch (source) {
             case EXTERNAL -> target == NetworkTier.DMZ;
             case DMZ -> target == NetworkTier.APPLICATION;

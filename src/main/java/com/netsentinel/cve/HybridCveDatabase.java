@@ -45,6 +45,11 @@ public class HybridCveDatabase implements CveDatabase {
 
     private final NvdApiClient nvdApiClient;
     private final SimulatedCveDatabase simulatedDb;
+    private final OfflineNvdCveDatabase offlineDb;
+
+    /** When true, never call the live NVD API (reproducible runs from the pinned snapshot). */
+    @Value("${netsentinel.nvd.offline-only:false}")
+    private boolean offlineOnly;
 
     /** In-memory cache: CPE string → resolved CVE list */
     private final ConcurrentHashMap<String, List<CveRecord>> cache = new ConcurrentHashMap<>();
@@ -55,8 +60,10 @@ public class HybridCveDatabase implements CveDatabase {
     private volatile int nvdMisses = 0;
 
     public HybridCveDatabase(NvdApiClient nvdApiClient,
-                              @Qualifier("simulatedCveDb") SimulatedCveDatabase simulatedDb) {
+                              @Qualifier("simulatedCveDb") SimulatedCveDatabase simulatedDb,
+                              OfflineNvdCveDatabase offlineDb) {
         this.nvdApiClient = nvdApiClient;
+        this.offlineDb = offlineDb;
         this.simulatedDb = simulatedDb;
     }
 
@@ -69,8 +76,18 @@ public class HybridCveDatabase implements CveDatabase {
 
         List<CveRecord> results = List.of();
 
-        // Attempt NVD API lookup if enabled and still considered available
-        if (nvdEnabled && nvdAvailable) {
+        // 1. Pinned offline snapshot (reproducible)
+        if (!offlineDb.isEmpty()) {
+            results = offlineDb.findByCpe(cpeString);
+            if (!results.isEmpty()) {
+                log.debug("  [Offline NVD] {} CVEs for {}", results.size(), cpeString);
+                cache.put(cpeString, results);
+                return results;
+            }
+        }
+
+        // 2. Attempt NVD API lookup if enabled and still considered available
+        if (nvdEnabled && nvdAvailable && !offlineOnly) {
             try {
                 results = nvdApiClient.fetchByCpe(cpeString)
                         .get(timeoutSeconds, TimeUnit.SECONDS);
@@ -107,7 +124,9 @@ public class HybridCveDatabase implements CveDatabase {
 
     @Override
     public List<CveRecord> findAll() {
-        return simulatedDb.findAll();
+        List<CveRecord> all = new ArrayList<>(offlineDb.findAll());
+        all.addAll(simulatedDb.findAll());
+        return all;
     }
 
     /**

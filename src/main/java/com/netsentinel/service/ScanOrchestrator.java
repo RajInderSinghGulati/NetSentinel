@@ -3,6 +3,9 @@ package com.netsentinel.service;
 import com.netsentinel.ai.AttackPathAnalyzer;
 import com.netsentinel.ai.CompromiseScorer;
 import com.netsentinel.ai.RemediationGenerator;
+import com.netsentinel.ai.PatchOptimizer;
+import com.netsentinel.ai.PatchUnit;
+import com.netsentinel.ai.RiskModel;
 import com.netsentinel.cve.HybridCveDatabase;
 import com.netsentinel.graph.AttackGraphBuilder;
 import com.netsentinel.graph.AttackGraphBuilder.AttackGraphResult;
@@ -10,6 +13,7 @@ import com.netsentinel.model.*;
 import com.netsentinel.scanner.NetworkScanner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -33,39 +37,78 @@ public class ScanOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(ScanOrchestrator.class);
 
-    private final NetworkScanner networkScanner;
+    private final Map<String, NetworkScanner> scanners;
     private final AttackGraphBuilder graphBuilder;
     private final CompromiseScorer compromiseScorer;
     private final AttackPathAnalyzer pathAnalyzer;
     private final RemediationGenerator remediationGenerator;
     private final SimpMessagingTemplate messagingTemplate;
     private final HybridCveDatabase hybridCveDatabase;
+    private final RiskModel riskModel;
+    private final PatchOptimizer patchOptimizer;
+
+    @Value("${netsentinel.scan.mode:simulated}")
+    private String defaultScanMode;
+
+    /** Number of attack paths to report. */
+    @Value("${netsentinel.ai.k-paths:5}")
+    private int kPaths;
+
+    /** Number of patches the automatic remediation plan may use. */
+    @Value("${netsentinel.remediation.budget:3}")
+    private int remediationBudget;
 
     private final Map<String, ScanResult> scans = new ConcurrentHashMap<>();
     private final Map<String, AttackGraphResult> graphResults = new ConcurrentHashMap<>();
 
-    public ScanOrchestrator(NetworkScanner networkScanner,
+    public ScanOrchestrator(List<NetworkScanner> networkScanners,
                             AttackGraphBuilder graphBuilder,
                             CompromiseScorer compromiseScorer,
                             AttackPathAnalyzer pathAnalyzer,
                             RemediationGenerator remediationGenerator,
                             SimpMessagingTemplate messagingTemplate,
-                            HybridCveDatabase hybridCveDatabase) {
-        this.networkScanner = networkScanner;
+                            HybridCveDatabase hybridCveDatabase,
+                            RiskModel riskModel,
+                            PatchOptimizer patchOptimizer) {
+        this.scanners = networkScanners.stream().collect(Collectors.toMap(NetworkScanner::mode, s -> s));
         this.graphBuilder = graphBuilder;
         this.compromiseScorer = compromiseScorer;
         this.pathAnalyzer = pathAnalyzer;
         this.remediationGenerator = remediationGenerator;
         this.messagingTemplate = messagingTemplate;
         this.hybridCveDatabase = hybridCveDatabase;
+        this.riskModel = riskModel;
+        this.patchOptimizer = patchOptimizer;
+    }
+
+    private NetworkScanner scannerFor(ScanTarget target) {
+        String mode = target.mode() != null && !target.mode().isBlank() ? target.mode() : defaultScanMode;
+        NetworkScanner s = scanners.get(mode.toLowerCase());
+        if (s == null) throw new IllegalArgumentException("unknown scan mode: " + mode);
+        return s;
+    }
+
+    /** Graph and node map of a finished scan (used by the remediation optimizer). */
+    public Optional<AttackGraphResult> getGraphResult(String scanId) {
+        return Optional.ofNullable(graphResults.get(scanId));
     }
 
     /**
      * Executes the full four-tier pipeline asynchronously.
      */
     public ScanResult executePipeline(ScanTarget target) {
+        return executePipeline(newScan(target));
+    }
+
+    /** Registers a scan (so its id is known before it runs); pass the result to {@link #executePipeline(ScanResult)}. */
+    public ScanResult newScan(ScanTarget target) {
         ScanResult result = new ScanResult(target);
         scans.put(result.getScanId(), result);
+        return result;
+    }
+
+    public ScanResult executePipeline(ScanResult result) {
+        ScanTarget target = result.getTarget();
 
         log.info("═══════════════════════════════════════════════════════════");
         log.info("  NetSentinel-AI Pipeline — Scan ID: {}", result.getScanId());
@@ -80,7 +123,7 @@ public class ScanOrchestrator {
             result.setStatusMessage("Tier 1: Scanning subnet with virtual threads...");
             broadcastProgress(result);
 
-            List<HostFingerprint> hosts = networkScanner.scan(target, host -> {
+            List<HostFingerprint> hosts = scannerFor(target).scan(target, host -> {
                 broadcastEvent("host-discovered", Map.of(
                         "ip", host.ip(),
                         "hostname", host.hostname(),
@@ -121,15 +164,19 @@ public class ScanOrchestrator {
             // TIER 3: AI Scoring & Path Analysis
             // ════════════════════════════════════════
             result.setStatus(ScanResult.Status.ANALYZING);
-            result.setStatusMessage("Tier 3: Running DL4J compromise scorer and Yen's K-SP...");
+            result.setStatusMessage("Tier 3: Running learned exploitability scorer and Yen's K-SP...");
             broadcastProgress(result);
 
-            // Score edges with MLP
+            // Score edges with the learned exploitability model
             compromiseScorer.scoreGraphEdges(graphResult.graph());
+
+            // Host compromise probabilities (correlated-exploit model) and crown-jewel risk
+            var compiled = riskModel.compile(graphResult.graph(), RiskModel.Variant.CORRELATED);
+            result.setCrownJewelRisk(riskModel.applyTo(compiled));
 
             // Find attack paths
             List<AttackPath> attackPaths = pathAnalyzer.findTopKAttackPaths(
-                    graphResult.graph(), graphResult.nodeMap(), 5);
+                    graphResult.graph(), graphResult.nodeMap(), kPaths);
 
             result.setAttackPaths(attackPaths);
 
@@ -152,8 +199,16 @@ public class ScanOrchestrator {
             result.setStatusMessage("Tier 4: Generating remediation playbook...");
             broadcastProgress(result);
 
-            String playbook = remediationGenerator.generatePlaybook(attackPaths);
-            result.setRemediationPlaybook(playbook);
+            // Pick the patch set (exact optimum when the search is small enough, else greedy)
+            var plan = patchOptimizer.plan(compiled, PatchOptimizer.Strategy.OPTIMAL, remediationBudget, 42L);
+            if (!plan.computed()) {
+                plan = patchOptimizer.plan(compiled, PatchOptimizer.Strategy.GREEDY, remediationBudget, 42L);
+            }
+            result.setPatchPlan(plan);
+            var remediation = remediationGenerator.generate(plan.patches(), plan.strategy().name(),
+                    plan.budget(), result.getCrownJewelRisk(), plan.risk());
+            result.setRemediation(remediation);
+            result.setRemediationPlaybook(remediation.combined());
 
             // Build graph data for frontend visualization
             result.setGraphData(buildGraphVisualizationData(graphResult, attackPaths));
@@ -185,6 +240,51 @@ public class ScanOrchestrator {
         return result;
     }
 
+    /** Outcome of applying a patch plan to the scanned inventory and re-running the pipeline. */
+    public record PlanVerification(String strategy, int budget, List<String> patches,
+                                   double baselineRisk, double predictedRisk, double rescanRisk,
+                                   int pathsBefore, int pathsAfter, List<String> upgrades) {}
+
+    /**
+     * Applies a patch plan to the discovered inventory (the patched products are removed from each
+     * host's CPE list), then re-runs CVE matching, graph building, scoring and path search from scratch.
+     * This independently checks the optimizer's prediction, which edits the compiled graph in place.
+     */
+    public Optional<PlanVerification> verifyPlan(String scanId, PatchOptimizer.Strategy strategy, int budget) {
+        ScanResult scan = scans.get(scanId);
+        AttackGraphResult before = graphResults.get(scanId);
+        if (scan == null || before == null || scan.getDiscoveredHosts() == null) return Optional.empty();
+
+        var compiled = riskModel.compile(before.graph(), RiskModel.Variant.CORRELATED);
+        PatchOptimizer.Plan plan = patchOptimizer.plan(compiled, strategy, budget, 42L);
+        if (!plan.computed()) return Optional.empty();
+
+        // installed CPE -> CPE after the upgrade (unchanged where no fixed release is known)
+        Map<String, Map<String, String>> upgraded = new HashMap<>();
+        for (PatchUnit u : plan.patches()) {
+            if (u.targetCpe() != null) {
+                upgraded.computeIfAbsent(u.hostId(), k -> new HashMap<>()).put(u.cpe(), u.targetCpe());
+            }
+        }
+        List<HostFingerprint> after = scan.getDiscoveredHosts().stream()
+                .map(h -> new HostFingerprint(h.ip(), h.hostname(), h.openPorts(), h.banners(),
+                        h.cpeStrings().stream()
+                                .map(c -> upgraded.getOrDefault(h.ip(), Map.of()).getOrDefault(c, c)).toList(),
+                        h.osTag(), h.tier(), h.criticality()))
+                .toList();
+
+        AttackGraphResult rebuilt = graphBuilder.buildGraph(after);
+        compromiseScorer.scoreGraphEdges(rebuilt.graph());
+        double rescanRisk = riskModel.applyToGraph(rebuilt.graph(), RiskModel.Variant.CORRELATED);
+        int pathsAfter = pathAnalyzer.findTopKAttackPaths(rebuilt.graph(), rebuilt.nodeMap(), kPaths).size();
+
+        return Optional.of(new PlanVerification(strategy.name(), plan.budget(),
+                plan.patches().stream().map(PatchUnit::label).toList(),
+                scan.getCrownJewelRisk(), plan.risk(), rescanRisk,
+                scan.getAttackPaths() == null ? 0 : scan.getAttackPaths().size(), pathsAfter,
+                plan.patches().stream().map(PatchUnit::upgradeSummary).toList()));
+    }
+
     /**
      * Retrieves a scan result by ID.
      */
@@ -208,12 +308,13 @@ public class ScanOrchestrator {
         var graph = graphResult.graph();
         List<Map<String, Object>> elements = new ArrayList<>();
 
-        // Collect all edges that are part of attack paths for highlighting
-        Set<String> attackPathEdgeIds = new HashSet<>();
+        // The graph holds one edge per (source, target, CVE); drawing them all is unreadable, so the
+        // dashboard gets ONE edge per host pair (the most likely CVE, plus a count).
+        Set<String> attackPathEdgeIds = new HashSet<>();   // pair ids "source>target"
         Set<String> attackPathNodeIds = new HashSet<>();
         for (AttackPath path : attackPaths) {
-            for (ExploitEdge edge : path.edges()) {
-                attackPathEdgeIds.add(edge.getEdgeId());
+            for (int i = 0; i + 1 < path.hops().size(); i++) {
+                attackPathEdgeIds.add(path.hops().get(i).getId() + ">" + path.hops().get(i + 1).getId());
             }
             for (HostNode node : path.hops()) {
                 attackPathNodeIds.add(node.getId());
@@ -250,22 +351,33 @@ public class ScanOrchestrator {
             elements.add(Map.of("group", "nodes", "data", data));
         }
 
-        // Edges
+        // Edges, grouped per host pair
+        Map<String, List<ExploitEdge>> byPair = new TreeMap<>();
         for (ExploitEdge edge : graph.edgeSet()) {
-            HostNode source = graph.getEdgeSource(edge);
-            HostNode target = graph.getEdgeTarget(edge);
-
+            byPair.computeIfAbsent(graph.getEdgeSource(edge).getId() + ">" + graph.getEdgeTarget(edge).getId(),
+                    k -> new ArrayList<>()).add(edge);
+        }
+        for (var pair : byPair.entrySet()) {
+            List<ExploitEdge> edges = pair.getValue();
+            edges.sort(Comparator.comparingDouble(ExploitEdge::getExploitProbability).reversed());
+            ExploitEdge best = edges.get(0);
             Map<String, Object> data = new LinkedHashMap<>();
-            data.put("id", edge.getEdgeId());
-            data.put("source", source.getId());
-            data.put("target", target.getId());
-            data.put("exploitProb", Math.round(edge.getExploitProbability() * 1000.0) / 1000.0);
-            data.put("cve", edge.getExploitedCve() != null ? edge.getExploitedCve().cveId() : null);
-            data.put("cvss", edge.getExploitedCve() != null ? edge.getExploitedCve().cvssBaseScore() : 0);
-            data.put("protocol", edge.getProtocol());
-            data.put("port", edge.getTargetPort());
-            data.put("onAttackPath", attackPathEdgeIds.contains(edge.getEdgeId()));
-
+            data.put("id", pair.getKey());
+            data.put("source", graph.getEdgeSource(best).getId());
+            data.put("target", graph.getEdgeTarget(best).getId());
+            data.put("exploitProb", Math.round(best.getExploitProbability() * 1000.0) / 1000.0);
+            data.put("cve", best.getExploitedCve() != null ? best.getExploitedCve().cveId() : null);
+            data.put("cvss", best.getExploitedCve() != null ? best.getExploitedCve().cvssBaseScore() : 0);
+            data.put("protocol", best.getProtocol());
+            data.put("port", best.getTargetPort());
+            data.put("count", edges.size());
+            data.put("topCves", edges.stream().limit(3)
+                    .map(e -> e.getExploitedCve() != null ? e.getExploitedCve().cveId() : "reachability").toList());
+            data.put("onAttackPath", attackPathEdgeIds.contains(pair.getKey()));
+            if (attackPathEdgeIds.contains(pair.getKey())) {
+                data.put("label", (best.getExploitedCve() != null ? best.getExploitedCve().cveId() : "reachability")
+                        + "  P=" + String.format("%.2f", best.getExploitProbability()));
+            }
             elements.add(Map.of("group", "edges", "data", data));
         }
 
@@ -284,9 +396,11 @@ public class ScanOrchestrator {
                                    "cvss", p.bottleneckCve().cvssBaseScore(),
                                    "severity", p.bottleneckCve().severity(),
                                    "description", p.bottleneckCve().description()) : null);
-                    ps.put("edges", p.edges().stream()
-                            .map(ExploitEdge::getEdgeId)
-                            .collect(Collectors.toList()));
+                    List<String> pairIds = new ArrayList<>();
+                    for (int i = 0; i + 1 < p.hops().size(); i++) {
+                        pairIds.add(p.hops().get(i).getId() + ">" + p.hops().get(i + 1).getId());
+                    }
+                    ps.put("edges", pairIds);
                     return ps;
                 })
                 .collect(Collectors.toList());

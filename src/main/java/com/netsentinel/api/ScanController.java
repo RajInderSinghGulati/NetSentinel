@@ -1,5 +1,9 @@
 package com.netsentinel.api;
 
+import com.netsentinel.ai.PatchOptimizer;
+import com.netsentinel.ai.PatchUnit;
+import com.netsentinel.ai.RemediationGenerator;
+import com.netsentinel.ai.RiskModel;
 import com.netsentinel.model.ScanResult;
 import com.netsentinel.model.ScanTarget;
 import com.netsentinel.service.ScanOrchestrator;
@@ -25,10 +29,17 @@ public class ScanController {
 
     private static final Logger log = LoggerFactory.getLogger(ScanController.class);
     private final ScanOrchestrator orchestrator;
+    private final RiskModel riskModel;
+    private final PatchOptimizer patchOptimizer;
+    private final RemediationGenerator remediationGenerator;
     private final ExecutorService scanExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
-    public ScanController(ScanOrchestrator orchestrator) {
+    public ScanController(ScanOrchestrator orchestrator, RiskModel riskModel, PatchOptimizer patchOptimizer,
+                          RemediationGenerator remediationGenerator) {
         this.orchestrator = orchestrator;
+        this.riskModel = riskModel;
+        this.patchOptimizer = patchOptimizer;
+        this.remediationGenerator = remediationGenerator;
     }
 
     /**
@@ -41,23 +52,12 @@ public class ScanController {
         String cidr = request.getOrDefault("cidr", "192.168.10.0/24");
         log.info("API: Scan requested for {}", cidr);
 
-        ScanTarget target = new ScanTarget(cidr);
+        ScanTarget target = new ScanTarget(cidr, request.get("mode"));
 
-        // Execute pipeline asynchronously on a virtual thread
-        ScanResult[] resultHolder = new ScanResult[1];
-        var future = scanExecutor.submit(() -> {
-            resultHolder[0] = orchestrator.executePipeline(target);
-        });
-
-        // Wait briefly for the scan to start and get its ID
-        try { Thread.sleep(100); } catch (InterruptedException ignored) {}
-
-        // Find the latest scan
-        ScanResult latestScan = orchestrator.getAllScans().stream()
-                .reduce((first, second) -> second)
-                .orElse(null);
-
-        String scanId = latestScan != null ? latestScan.getScanId() : "unknown";
+        // Register the scan first so its id is known, then run the pipeline on a virtual thread
+        ScanResult scan = orchestrator.newScan(target);
+        scanExecutor.submit(() -> orchestrator.executePipeline(scan));
+        String scanId = scan.getScanId();
 
         return ResponseEntity.ok(Map.of(
                 "scanId", scanId,
@@ -75,7 +75,7 @@ public class ScanController {
         String cidr = request.getOrDefault("cidr", "192.168.10.0/24");
         log.info("API: Synchronous scan requested for {}", cidr);
 
-        ScanTarget target = new ScanTarget(cidr);
+        ScanTarget target = new ScanTarget(cidr, request.get("mode"));
         ScanResult result = orchestrator.executePipeline(target);
 
         return ResponseEntity.ok(buildScanResponse(result));
@@ -133,17 +133,109 @@ public class ScanController {
     }
 
     /**
-     * GET /api/scan/{id}/remediation — Get generated remediation playbook.
+     * GET /api/scan/{id}/remediation: remediation artifacts. Without parameters this is the plan chosen
+     * automatically during the scan; with {@code strategy} and {@code budget} the artifacts are generated
+     * for that plan instead.
      */
     @GetMapping("/scan/{id}/remediation")
-    public ResponseEntity<?> getRemediation(@PathVariable String id) {
+    public ResponseEntity<?> getRemediation(@PathVariable String id,
+                                            @RequestParam(required = false) PatchOptimizer.Strategy strategy,
+                                            @RequestParam(required = false) Integer budget) {
         return orchestrator.getScan(id)
-                .filter(scan -> scan.getRemediationPlaybook() != null)
-                .map(scan -> ResponseEntity.ok(Map.of(
-                        "scanId", scan.getScanId(),
-                        "playbook", scan.getRemediationPlaybook()
-                )))
+                .filter(scan -> scan.getRemediation() != null)
+                .map(scan -> {
+                    PatchOptimizer.Plan plan = scan.getPatchPlan();
+                    RemediationGenerator.Remediation r = scan.getRemediation();
+                    String playbook = scan.getRemediationPlaybook();
+                    if (strategy != null) {
+                        var graph = orchestrator.getGraphResult(id).orElse(null);
+                        if (graph == null) return ResponseEntity.notFound().build();
+                        var compiled = riskModel.compile(graph.graph(), RiskModel.Variant.CORRELATED);
+                        int b = Math.max(0, Math.min(budget != null ? budget : plan.budget(), 10));
+                        plan = patchOptimizer.plan(compiled, strategy, b, 42L);
+                        if (!plan.computed()) return ResponseEntity.unprocessableEntity()
+                                .body(Map.of("error", "search space too large for " + strategy));
+                        r = remediationGenerator.generate(plan.patches(), plan.strategy().name(),
+                                plan.budget(), scan.getCrownJewelRisk(), plan.risk());
+                        playbook = r.combined();
+                    }
+                    Map<String, Object> body = new LinkedHashMap<>();
+                    body.put("scanId", scan.getScanId());
+                    body.put("playbook", playbook);
+                    body.put("ansible", r.ansible());
+                    body.put("inventory", r.inventory());
+                    body.put("bash", r.bash());
+                    body.put("report", r.report());
+                    body.put("strategy", plan.strategy().name());
+                    body.put("budget", plan.budget());
+                    body.put("riskBefore", scan.getCrownJewelRisk());
+                    body.put("riskAfter", plan.risk());
+                    body.put("patches", plan.patches().stream().map(PatchUnit::label).toList());
+                    body.put("upgrades", plan.patches().stream().map(ScanController::upgradeDetails).toList());
+                    return ResponseEntity.ok(body);
+                })
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * GET /api/scan/{id}/verify?strategy=OPTIMAL&budget=3: apply the plan to the inventory and re-scan.
+     */
+    @GetMapping("/scan/{id}/verify")
+    public ResponseEntity<?> verify(@PathVariable String id,
+                                    @RequestParam(defaultValue = "OPTIMAL") PatchOptimizer.Strategy strategy,
+                                    @RequestParam(defaultValue = "3") int budget) {
+        return orchestrator.verifyPlan(id, strategy, Math.max(0, Math.min(budget, 10)))
+                .<ResponseEntity<?>>map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * GET /api/scan/{id}/optimize?maxBudget=6 — Risk-vs-budget curves for every patching strategy.
+     *
+     * <p>Risk is the criticality-weighted expected number of compromised crown jewels. A patch is
+     * "upgrade product P on host H". OPTIMAL is null where the exhaustive search was too large.
+     * With {@code mcTrials > 0}, each plan's risk is also estimated by Monte Carlo sampling
+     * ({@code mcRisk}) to validate the analytic model.</p>
+     */
+    @GetMapping("/scan/{id}/optimize")
+    public ResponseEntity<?> optimize(@PathVariable String id,
+                                      @RequestParam(defaultValue = "6") int maxBudget,
+                                      @RequestParam(defaultValue = "0") int mcTrials) {
+        int budget = Math.max(0, Math.min(maxBudget, 10));
+        return orchestrator.getGraphResult(id).map(gr -> {
+            var compiled = riskModel.compile(gr.graph(), RiskModel.Variant.CORRELATED);
+            var curve = patchOptimizer.curve(compiled, budget, 42L);
+            double baseline = patchOptimizer.baselineRisk(compiled);
+
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("scanId", id);
+            body.put("baselineRisk", baseline);
+            body.put("patchUnits", compiled.units.size());
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (int b = 0; b <= budget; b++) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("budget", b);
+                for (PatchOptimizer.Strategy s : PatchOptimizer.Strategy.values()) {
+                    PatchOptimizer.Plan plan = curve.get(s).get(b);
+                    Map<String, Object> cell = new LinkedHashMap<>();
+                    cell.put("risk", plan.computed() ? plan.risk() : null);
+                    cell.put("reductionPct", plan.computed() && baseline > 0
+                            ? 100.0 * (1.0 - plan.risk() / baseline) : null);
+                    cell.put("patches", plan.patches().stream().map(PatchUnit::label).toList());
+                    cell.put("upgrades", plan.patches().stream().map(PatchUnit::upgradeSummary).toList());
+                    if (mcTrials > 0 && plan.computed() && s != PatchOptimizer.Strategy.RANDOM) {
+                        boolean[] removed = new boolean[compiled.units.size()];
+                        plan.patches().forEach(u -> removed[u.index()] = true);
+                        double[] pm = riskModel.monteCarlo(compiled, removed, mcTrials, 7L);
+                        cell.put("mcRisk", riskModel.crownJewelRisk(compiled, pm));
+                    }
+                    row.put(s.name(), cell);
+                }
+                rows.add(row);
+            }
+            body.put("curve", rows);
+            return ResponseEntity.ok(body);
+        }).orElse(ResponseEntity.notFound().build());
     }
 
     /**
@@ -158,10 +250,25 @@ public class ScanController {
                     s.put("target", scan.getTarget().cidr());
                     s.put("status", scan.getStatus().name());
                     s.put("durationMs", scan.durationMs());
+                    s.put("startedAt", scan.getStartTime().toString());
                     return s;
                 })
+                .sorted(Comparator.comparing((Map<String, Object> m) -> (String) m.get("startedAt")))
                 .toList();
         return ResponseEntity.ok(scanList);
+    }
+
+    private static Map<String, Object> upgradeDetails(PatchUnit u) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("host", u.hostname());
+        m.put("product", u.product());
+        m.put("from", u.currentVersion());
+        m.put("to", u.targetVersion());
+        m.put("toLabel", u.targetLabel());
+        m.put("fixes", u.fixedCveIds().size());
+        m.put("remaining", u.cves().size() - u.fixedCveIds().size());
+        m.put("introduced", u.introduced().size());
+        return m;
     }
 
     private Map<String, Object> buildScanResponse(ScanResult result) {
@@ -176,6 +283,7 @@ public class ScanController {
         response.put("graphEdges", result.getGraphEdgeCount());
         response.put("attackPaths", result.getAttackPaths() != null ? result.getAttackPaths().size() : 0);
         response.put("highestRisk", result.getHighestPathRisk());
+        response.put("crownJewelRisk", result.getCrownJewelRisk());
         response.put("message", result.getStatusMessage());
         return response;
     }

@@ -1,9 +1,15 @@
 server:
   port: 8080
+  address: 127.0.0.1        # the API is unauthenticated: listen on loopback unless you add auth
 
 spring:
   application:
     name: NetSentinel-AI
+  web:
+    resources:
+      cache:
+        cachecontrol:
+          no-cache: true     # always revalidate the dashboard files (no stale UI after an update)
   threads:
     virtual:
       enabled: true
@@ -12,22 +18,29 @@ spring:
 netsentinel:
   scan:
     mode: simulated          # simulated | live
-    thread-pool-size: 100    # Virtual thread concurrency limit
-    timeout-ms: 5000         # Per-host scan timeout
-    simulated-delay-ms: 200  # Artificial delay per host in simulation
+    simulated-delay-ms: 150  # Artificial delay per host in simulation (0 = none)
+    live:
+      inventory: lab/inventory.yml   # Declared assets (tier, criticality) for live scans of 'lab'
+      connect-timeout-ms: 400
+      read-timeout-ms: 700
+      allow-cidr-sweep: false        # true = also accept a private-range CIDR as scan target
   ai:
-    model-retrain: false     # Re-train DL4J model on startup
-    k-paths: 5               # Number of attack paths to compute
+    model-path: /model/exploit_model.json   # Exported gradient-boosted exploitability model
+    known-exploited-probability: 0.9        # Floor for CVEs already in CISA KEV
+    k-paths: 5               # Number of attack routes to report
+  remediation:
+    budget: 3                # Patches the automatic remediation plan may use
   graph:
-    max-nodes: 500           # Maximum nodes in attack graph
+    max-edges: 3000000       # Fail a scan whose explicit attack graph would exceed this many edges
   nvd:
+    snapshot-path: ""        # Pinned NVD snapshot file (default: classpath nvd/snapshot.json)
+    offline-only: false      # true = never call live NVD (reproducible runs)
     enabled: true            # Enable live NVD API v2 CVE lookups
     api-key: ""              # Optional — increases rate limit from 5 to 50 req/30s
     timeout-seconds: 3       # Per-request timeout before falling back to simulated DB
+    page-size: 2000          # CVEs per NVD request (max 2000)
     base-url: https://services.nvd.nist.gov/rest/json/cves/2.0
 
 logging:
   level:
     com.netsentinel: DEBUG
-    org.deeplearning4j: WARN
-    org.nd4j: WARN

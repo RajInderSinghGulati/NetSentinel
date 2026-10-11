@@ -19,6 +19,12 @@ import java.util.List;
  * @param affectedCpes      List of affected CPE strings
  * @param patchAvailable    Whether an official patch exists
  * @param exploitInWild     Whether active exploitation has been observed
+ * @param publishedYear     Year the CVE was published (0 if unknown); used for temporal train/test splits
+ * @param vendor            Vendor of the affected product ("unknown" if none)
+ * @param scope             CVSS scope: UNCHANGED or CHANGED
+ * @param confImpact        CVSS confidentiality impact: NONE, LOW, HIGH
+ * @param integImpact       CVSS integrity impact: NONE, LOW, HIGH
+ * @param availImpact       CVSS availability impact: NONE, LOW, HIGH
  */
 public record CveRecord(
         String cveId,
@@ -31,8 +37,64 @@ public record CveRecord(
         String cweId,
         List<String> affectedCpes,
         boolean patchAvailable,
-        boolean exploitInWild
+        boolean exploitInWild,
+        int publishedYear,
+        String vendor,
+        String scope,
+        String confImpact,
+        String integImpact,
+        String availImpact
 ) {
+
+    /**
+     * Convenience constructor for hand-written records (simulated DB): derives year from the
+     * CVE id, vendor from the CPEs, and approximates scope/CIA impact from the base score.
+     */
+    public CveRecord(String cveId, String description, double cvssBaseScore,
+                     AttackVector attackVector, AttackComplexity attackComplexity,
+                     PrivilegesRequired privilegesRequired, UserInteraction userInteraction,
+                     String cweId, List<String> affectedCpes,
+                     boolean patchAvailable, boolean exploitInWild) {
+        this(cveId, description, cvssBaseScore, attackVector, attackComplexity,
+                privilegesRequired, userInteraction, cweId, affectedCpes,
+                patchAvailable, exploitInWild,
+                yearFromId(cveId), vendorFromCpes(affectedCpes),
+                "UNCHANGED", impactFromScore(cvssBaseScore),
+                impactFromScore(cvssBaseScore), impactFromScore(cvssBaseScore));
+    }
+
+    private static String impactFromScore(double cvss) {
+        return cvss >= 7.0 ? "HIGH" : cvss >= 4.0 ? "LOW" : "NONE";
+    }
+
+    public static int yearFromId(String cveId) {
+        String[] p = cveId == null ? new String[0] : cveId.split("-");
+        try {
+            return p.length >= 3 ? Integer.parseInt(p[1]) : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    public static String vendorFromCpes(List<String> cpes) {
+        if (cpes == null || cpes.isEmpty()) return "unknown";
+        // Most frequent vendor among affected CPEs, ties broken by first occurrence. Must match
+        // scripts/build_dataset.py (Counter.most_common), because it is a model feature.
+        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
+        for (String cpe : cpes) {
+            String[] parts = cpe.split(":");
+            if (parts.length > 3 && !parts[3].equals("*")) counts.merge(parts[3], 1, Integer::sum);
+        }
+        String best = "unknown";
+        int bestCount = 0;
+        for (var e : counts.entrySet()) {
+            if (e.getValue() > bestCount) {
+                best = e.getKey();
+                bestCount = e.getValue();
+            }
+        }
+        return best;
+    }
 
     public enum AttackVector { NETWORK, ADJACENT, LOCAL, PHYSICAL }
     public enum AttackComplexity { LOW, HIGH }

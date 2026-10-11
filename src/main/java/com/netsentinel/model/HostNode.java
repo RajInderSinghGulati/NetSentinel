@@ -1,7 +1,9 @@
 package com.netsentinel.model;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Graph vertex representing a network host in the attack graph.
@@ -14,6 +16,8 @@ public class HostNode {
     private final String id;
     private final HostFingerprint fingerprint;
     private final List<CveRecord> vulnerabilities;
+    /** CVEs grouped by the CPE they were matched through (a "patch unit" is one CPE on one host). */
+    private final Map<String, List<CveRecord>> vulnerabilitiesByCpe = new LinkedHashMap<>();
     private double riskScore;
     private double compromiseProbability;
 
@@ -34,6 +38,14 @@ public class HostNode {
     }
 
     /**
+     * Adds a matched CVE and remembers which CPE (installed product) it was matched through.
+     */
+    public void addVulnerability(CveRecord cve, String cpe) {
+        addVulnerability(cve);
+        vulnerabilitiesByCpe.computeIfAbsent(cpe, k -> new ArrayList<>()).add(cve);
+    }
+
+    /**
      * Aggregate risk = weighted sum of CVSS scores adjusted by asset criticality.
      * Uses the formula: R = criticality * (1 - ∏(1 - cvss_i/10))
      * This models the probability of at least one vulnerability being exploited.
@@ -51,6 +63,7 @@ public class HostNode {
     public String getId() { return id; }
     public HostFingerprint getFingerprint() { return fingerprint; }
     public List<CveRecord> getVulnerabilities() { return List.copyOf(vulnerabilities); }
+    public Map<String, List<CveRecord>> getVulnerabilitiesByCpe() { return vulnerabilitiesByCpe; }
     public double getRiskScore() { return riskScore; }
     public double getCompromiseProbability() { return compromiseProbability; }
     public void setCompromiseProbability(double p) { this.compromiseProbability = p; }
