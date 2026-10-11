@@ -735,6 +735,10 @@
                 <span class="dot dot-idle" id="statusDot"></span>
                 <span id="statusText">Ready</span>
             </div>
+            <select id="modeSelect" class="scan-input" style="width:auto" onchange="onModeChange()" title="Scanner">
+                <option value="simulated">Simulated</option>
+                <option value="live">Live (lab)</option>
+            </select>
             <input type="text" id="cidrInput" class="scan-input" value="192.168.10.0/24" placeholder="CIDR Range">
             <button id="scanBtn" class="btn btn-primary" onclick="launchScan()">
                 ⚡ Launch Scan
@@ -1078,7 +1082,7 @@
                 const response = await fetch('/api/scan', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cidr })
+                    body: JSON.stringify({ cidr, mode: document.getElementById('modeSelect').value })
                 });
                 const result = await response.json();
                 currentScanId = result.scanId;
@@ -1099,12 +1103,17 @@
             }
         }
 
+        function onModeChange() {
+            const live = document.getElementById('modeSelect').value === 'live';
+            document.getElementById('cidrInput').value = live ? 'lab' : '192.168.10.0/24';
+        }
+
         async function fallbackSyncScan(cidr, btn) {
             try {
                 const response = await fetch('/api/scan/sync', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cidr })
+                    body: JSON.stringify({ cidr, mode: document.getElementById('modeSelect').value })
                 });
                 const result = await response.json();
                 currentScanId = result.scanId;

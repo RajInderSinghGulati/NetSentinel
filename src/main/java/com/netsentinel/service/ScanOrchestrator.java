@@ -37,7 +37,7 @@ public class ScanOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(ScanOrchestrator.class);
 
-    private final NetworkScanner networkScanner;
+    private final Map<String, NetworkScanner> scanners;
     private final AttackGraphBuilder graphBuilder;
     private final CompromiseScorer compromiseScorer;
     private final AttackPathAnalyzer pathAnalyzer;
@@ -47,6 +47,9 @@ public class ScanOrchestrator {
     private final RiskModel riskModel;
     private final PatchOptimizer patchOptimizer;
 
+    @Value("${netsentinel.scan.mode:simulated}")
+    private String defaultScanMode;
+
     /** Number of patches the automatic remediation plan may use. */
     @Value("${netsentinel.remediation.budget:3}")
     private int remediationBudget;
@@ -54,7 +57,7 @@ public class ScanOrchestrator {
     private final Map<String, ScanResult> scans = new ConcurrentHashMap<>();
     private final Map<String, AttackGraphResult> graphResults = new ConcurrentHashMap<>();
 
-    public ScanOrchestrator(NetworkScanner networkScanner,
+    public ScanOrchestrator(List<NetworkScanner> networkScanners,
                             AttackGraphBuilder graphBuilder,
                             CompromiseScorer compromiseScorer,
                             AttackPathAnalyzer pathAnalyzer,
@@ -63,7 +66,7 @@ public class ScanOrchestrator {
                             HybridCveDatabase hybridCveDatabase,
                             RiskModel riskModel,
                             PatchOptimizer patchOptimizer) {
-        this.networkScanner = networkScanner;
+        this.scanners = networkScanners.stream().collect(Collectors.toMap(NetworkScanner::mode, s -> s));
         this.graphBuilder = graphBuilder;
         this.compromiseScorer = compromiseScorer;
         this.pathAnalyzer = pathAnalyzer;
@@ -72,6 +75,13 @@ public class ScanOrchestrator {
         this.hybridCveDatabase = hybridCveDatabase;
         this.riskModel = riskModel;
         this.patchOptimizer = patchOptimizer;
+    }
+
+    private NetworkScanner scannerFor(ScanTarget target) {
+        String mode = target.mode() != null && !target.mode().isBlank() ? target.mode() : defaultScanMode;
+        NetworkScanner s = scanners.get(mode.toLowerCase());
+        if (s == null) throw new IllegalArgumentException("unknown scan mode: " + mode);
+        return s;
     }
 
     /** Graph and node map of a finished scan (used by the remediation optimizer). */
@@ -99,7 +109,7 @@ public class ScanOrchestrator {
             result.setStatusMessage("Tier 1: Scanning subnet with virtual threads...");
             broadcastProgress(result);
 
-            List<HostFingerprint> hosts = networkScanner.scan(target, host -> {
+            List<HostFingerprint> hosts = scannerFor(target).scan(target, host -> {
                 broadcastEvent("host-discovered", Map.of(
                         "ip", host.ip(),
                         "hostname", host.hostname(),

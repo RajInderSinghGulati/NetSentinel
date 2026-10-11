@@ -1,0 +1,56 @@
+# NetSentinel vulnerable lab: five containers running old, publicly known-vulnerable software.
+#
+# Isolation: own project name, own networks, container names prefixed "nslab-", ports bound to 127.0.0.1 only
+# (18080-18381), no volumes (redis /data is tmpfs). It does not touch other Docker projects.
+#
+#   docker compose -f lab/docker-compose.yml up -d        # start
+#   docker compose -f lab/docker-compose.yml down         # stop and remove ONLY this lab (no volumes to lose)
+#
+# Tiers mirror lab/inventory.yml. The zone model is declared there; Docker does not enforce it, because
+# every service is reached through a published loopback port.
+name: netsentinel-lab
+
+services:
+  web-dmz:
+    image: httpd:2.4.49-alpine            # CVE-2021-41773 / CVE-2021-42013 (path traversal / RCE)
+    container_name: nslab-web-dmz
+    ports: ["127.0.0.1:18080:80"]
+    networks: [dmz]
+    restart: "no"
+
+  proxy-dmz:
+    image: nginx:1.18.0-alpine
+    container_name: nslab-proxy-dmz
+    ports: ["127.0.0.1:18081:80"]
+    networks: [dmz, app]
+    restart: "no"
+
+  app-cache:
+    image: redis:6.2.6-alpine
+    container_name: nslab-app-cache
+    command: ["redis-server", "--protected-mode", "no"]   # lab only: reachable from the Docker gateway
+    tmpfs: ["/data"]                      # the image declares a /data volume; keep it ephemeral
+    ports: ["127.0.0.1:18379:6379"]
+    networks: [app, data]
+    restart: "no"
+
+  data-memcached:
+    image: memcached:1.6.9-alpine
+    container_name: nslab-data-memcached
+    ports: ["127.0.0.1:18211:11211"]
+    networks: [data]
+    restart: "no"
+
+  secrets-vault:
+    image: redis:6.2.6-alpine             # stands in for a crown-jewel secrets store
+    container_name: nslab-secrets-vault
+    command: ["redis-server", "--protected-mode", "no"]
+    tmpfs: ["/data"]
+    ports: ["127.0.0.1:18380:6379"]
+    networks: [data]
+    restart: "no"
+
+networks:
+  dmz: {}
+  app: {}
+  data: {}

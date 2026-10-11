@@ -121,14 +121,20 @@ public class PatchOptimizer {
             return new Plan(Strategy.OPTIMAL, b, List.of(), Double.NaN, false);
         }
         boolean[] removed = new boolean[c.units.size()];
-        int[] pick = new int[k];
-        double[] best = {Double.POSITIVE_INFINITY};
-        int[] bestPick = new int[k];
-        search(c, cand, removed, pick, 0, 0, k, best, bestPick);
-        List<PatchUnit> chosen = new ArrayList<>();
-        for (int i : bestPick) chosen.add(cand.get(i));
-        if (k == 0) best[0] = riskModel.crownJewelRisk(c, removed);
-        return new Plan(Strategy.OPTIMAL, b, chosen, best[0], true);
+        // "At most B patches": try sizes 0..k and keep the smallest set that reaches the lowest risk.
+        double bestRisk = riskModel.crownJewelRisk(c, removed);
+        List<PatchUnit> bestSet = List.of();
+        for (int size = 1; size <= k; size++) {
+            double[] best = {bestRisk};
+            int[] bestPick = new int[size];
+            search(c, cand, removed, new int[size], 0, 0, size, best, bestPick);
+            if (best[0] < bestRisk - 1e-15) {
+                bestRisk = best[0];
+                bestSet = new ArrayList<>();
+                for (int i : bestPick) bestSet.add(cand.get(i));
+            }
+        }
+        return new Plan(Strategy.OPTIMAL, b, bestSet, bestRisk, true);
     }
 
     private void search(RiskModel.Compiled c, List<PatchUnit> cand, boolean[] removed, int[] pick,

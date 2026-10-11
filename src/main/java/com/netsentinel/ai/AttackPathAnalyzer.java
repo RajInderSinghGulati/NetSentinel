@@ -45,11 +45,17 @@ public class AttackPathAnalyzer {
 
         log.info("▶ Running Yen's K-Shortest Paths (K={})...", k);
 
-        // Identify entry points (EXTERNAL and DMZ nodes) and targets (CROWN_JEWEL nodes)
+        // Attacks start at the EXTERNAL attacker node, so a DMZ host is only on a path if the internet can
+        // actually reach it (this keeps the path list consistent with RiskModel). Graphs without an
+        // EXTERNAL node fall back to treating DMZ hosts as entry points.
         List<HostNode> entryPoints = graph.vertexSet().stream()
-                .filter(n -> n.getFingerprint().tier() == NetworkTier.EXTERNAL ||
-                             n.getFingerprint().tier() == NetworkTier.DMZ)
+                .filter(n -> n.getFingerprint().tier() == NetworkTier.EXTERNAL)
                 .collect(Collectors.toList());
+        if (entryPoints.isEmpty()) {
+            entryPoints = graph.vertexSet().stream()
+                    .filter(n -> n.getFingerprint().tier() == NetworkTier.DMZ)
+                    .collect(Collectors.toList());
+        }
 
         List<HostNode> crownJewels = graph.vertexSet().stream()
                 .filter(n -> n.getFingerprint().tier() == NetworkTier.CROWN_JEWEL)

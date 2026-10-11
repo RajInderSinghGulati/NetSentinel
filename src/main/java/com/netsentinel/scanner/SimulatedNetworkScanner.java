@@ -34,6 +34,11 @@ public class SimulatedNetworkScanner implements NetworkScanner {
     private static final int SIMULATED_DELAY_MS = 150;
 
     @Override
+    public String mode() {
+        return "simulated";
+    }
+
+    @Override
     public CompletableFuture<List<HostFingerprint>> scan(ScanTarget target, Consumer<HostFingerprint> progressCallback) {
         return CompletableFuture.supplyAsync(() -> {
             log.info("▶ Starting simulated scan of {} with virtual threads", target.cidr());

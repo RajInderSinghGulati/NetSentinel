@@ -15,6 +15,10 @@ netsentinel:
     thread-pool-size: 100    # Virtual thread concurrency limit
     timeout-ms: 5000         # Per-host scan timeout
     simulated-delay-ms: 200  # Artificial delay per host in simulation
+    live:
+      inventory: lab/inventory.yml   # Declared assets (tier, criticality) for live scans of 'lab'
+      connect-timeout-ms: 400
+      read-timeout-ms: 700
   ai:
     model-path: /model/exploit_model.json   # Exported gradient-boosted exploitability model
     known-exploited-probability: 0.9        # Floor for CVEs already in CISA KEV

@@ -16,6 +16,9 @@ import java.util.function.Consumer;
  */
 public interface NetworkScanner {
 
+    /** Scan mode this implementation serves: {@code simulated} or {@code live}. */
+    String mode();
+
     /**
      * Asynchronously scans the target subnet and returns discovered host fingerprints.
      *

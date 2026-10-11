@@ -52,7 +52,7 @@ public class ScanController {
         String cidr = request.getOrDefault("cidr", "192.168.10.0/24");
         log.info("API: Scan requested for {}", cidr);
 
-        ScanTarget target = new ScanTarget(cidr);
+        ScanTarget target = new ScanTarget(cidr, request.get("mode"));
 
         // Execute pipeline asynchronously on a virtual thread
         ScanResult[] resultHolder = new ScanResult[1];
@@ -86,7 +86,7 @@ public class ScanController {
         String cidr = request.getOrDefault("cidr", "192.168.10.0/24");
         log.info("API: Synchronous scan requested for {}", cidr);
 
-        ScanTarget target = new ScanTarget(cidr);
+        ScanTarget target = new ScanTarget(cidr, request.get("mode"));
         ScanResult result = orchestrator.executePipeline(target);
 
         return ResponseEntity.ok(buildScanResponse(result));

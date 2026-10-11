@@ -53,10 +53,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--api-key", default="")
     ap.add_argument("--cpe", nargs="*")
+    ap.add_argument("--merge", action="store_true",
+                    help="add to the existing snapshot instead of replacing it (keeps previously pinned CVEs)")
     a = ap.parse_args()
     cpes = a.cpe or default_cpes()
     delay = 0.7 if a.api_key else 7.0
     seen, failed = {}, []
+    out = ROOT / "src/main/resources/nvd"
+    prev_cpes = []
+    if a.merge and (out / "snapshot.json").exists():
+        for v in json.loads((out / "snapshot.json").read_text(encoding="utf-8")).get("vulnerabilities", []):
+            seen[v["cve"]["id"]] = v
+        meta = out / "snapshot.meta.json"
+        if meta.exists():
+            prev_cpes = json.loads(meta.read_text(encoding="utf-8")).get("cpes", [])
+        print(f"merging into existing snapshot ({len(seen)} CVEs)", file=sys.stderr)
     for i, cpe in enumerate(cpes):
         try:
             vulns = fetch(cpe, a.api_key)
@@ -67,12 +78,11 @@ def main():
             failed.append(cpe)
             print(f"[{i + 1}/{len(cpes)}] {cpe}: FAILED {e}", file=sys.stderr)
         time.sleep(delay)
-    out = ROOT / "src/main/resources/nvd"
     out.mkdir(parents=True, exist_ok=True)
     ordered = sorted(seen.values(), key=lambda v: v["cve"]["id"])
     (out / "snapshot.json").write_text(json.dumps({"vulnerabilities": ordered}), encoding="utf-8")
     (out / "snapshot.meta.json").write_text(json.dumps({
-        "fetched": datetime.date.today().isoformat(), "cpes": cpes,
+        "fetched": datetime.date.today().isoformat(), "cpes": sorted(set(prev_cpes) | set(cpes)),
         "failed": failed, "cve_count": len(seen)}, indent=2), encoding="utf-8")
     print(f"Wrote {len(seen)} CVEs ({len(failed)} CPE queries failed)", file=sys.stderr)
 
