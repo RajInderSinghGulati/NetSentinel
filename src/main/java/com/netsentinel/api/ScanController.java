@@ -54,21 +54,10 @@ public class ScanController {
 
         ScanTarget target = new ScanTarget(cidr, request.get("mode"));
 
-        // Execute pipeline asynchronously on a virtual thread
-        ScanResult[] resultHolder = new ScanResult[1];
-        var future = scanExecutor.submit(() -> {
-            resultHolder[0] = orchestrator.executePipeline(target);
-        });
-
-        // Wait briefly for the scan to start and get its ID
-        try { Thread.sleep(100); } catch (InterruptedException ignored) {}
-
-        // Find the latest scan
-        ScanResult latestScan = orchestrator.getAllScans().stream()
-                .reduce((first, second) -> second)
-                .orElse(null);
-
-        String scanId = latestScan != null ? latestScan.getScanId() : "unknown";
+        // Register the scan first so its id is known, then run the pipeline on a virtual thread
+        ScanResult scan = orchestrator.newScan(target);
+        scanExecutor.submit(() -> orchestrator.executePipeline(scan));
+        String scanId = scan.getScanId();
 
         return ResponseEntity.ok(Map.of(
                 "scanId", scanId,
@@ -261,8 +250,10 @@ public class ScanController {
                     s.put("target", scan.getTarget().cidr());
                     s.put("status", scan.getStatus().name());
                     s.put("durationMs", scan.durationMs());
+                    s.put("startedAt", scan.getStartTime().toString());
                     return s;
                 })
+                .sorted(Comparator.comparing((Map<String, Object> m) -> (String) m.get("startedAt")))
                 .toList();
         return ResponseEntity.ok(scanList);
     }

@@ -97,8 +97,18 @@ public class ScanOrchestrator {
      * Executes the full four-tier pipeline asynchronously.
      */
     public ScanResult executePipeline(ScanTarget target) {
+        return executePipeline(newScan(target));
+    }
+
+    /** Registers a scan (so its id is known before it runs); pass the result to {@link #executePipeline(ScanResult)}. */
+    public ScanResult newScan(ScanTarget target) {
         ScanResult result = new ScanResult(target);
         scans.put(result.getScanId(), result);
+        return result;
+    }
+
+    public ScanResult executePipeline(ScanResult result) {
+        ScanTarget target = result.getTarget();
 
         log.info("═══════════════════════════════════════════════════════════");
         log.info("  NetSentinel-AI Pipeline — Scan ID: {}", result.getScanId());
@@ -298,12 +308,13 @@ public class ScanOrchestrator {
         var graph = graphResult.graph();
         List<Map<String, Object>> elements = new ArrayList<>();
 
-        // Collect all edges that are part of attack paths for highlighting
-        Set<String> attackPathEdgeIds = new HashSet<>();
+        // The graph holds one edge per (source, target, CVE); drawing them all is unreadable, so the
+        // dashboard gets ONE edge per host pair (the most likely CVE, plus a count).
+        Set<String> attackPathEdgeIds = new HashSet<>();   // pair ids "source>target"
         Set<String> attackPathNodeIds = new HashSet<>();
         for (AttackPath path : attackPaths) {
-            for (ExploitEdge edge : path.edges()) {
-                attackPathEdgeIds.add(edge.getEdgeId());
+            for (int i = 0; i + 1 < path.hops().size(); i++) {
+                attackPathEdgeIds.add(path.hops().get(i).getId() + ">" + path.hops().get(i + 1).getId());
             }
             for (HostNode node : path.hops()) {
                 attackPathNodeIds.add(node.getId());
@@ -340,22 +351,33 @@ public class ScanOrchestrator {
             elements.add(Map.of("group", "nodes", "data", data));
         }
 
-        // Edges
+        // Edges, grouped per host pair
+        Map<String, List<ExploitEdge>> byPair = new TreeMap<>();
         for (ExploitEdge edge : graph.edgeSet()) {
-            HostNode source = graph.getEdgeSource(edge);
-            HostNode target = graph.getEdgeTarget(edge);
-
+            byPair.computeIfAbsent(graph.getEdgeSource(edge).getId() + ">" + graph.getEdgeTarget(edge).getId(),
+                    k -> new ArrayList<>()).add(edge);
+        }
+        for (var pair : byPair.entrySet()) {
+            List<ExploitEdge> edges = pair.getValue();
+            edges.sort(Comparator.comparingDouble(ExploitEdge::getExploitProbability).reversed());
+            ExploitEdge best = edges.get(0);
             Map<String, Object> data = new LinkedHashMap<>();
-            data.put("id", edge.getEdgeId());
-            data.put("source", source.getId());
-            data.put("target", target.getId());
-            data.put("exploitProb", Math.round(edge.getExploitProbability() * 1000.0) / 1000.0);
-            data.put("cve", edge.getExploitedCve() != null ? edge.getExploitedCve().cveId() : null);
-            data.put("cvss", edge.getExploitedCve() != null ? edge.getExploitedCve().cvssBaseScore() : 0);
-            data.put("protocol", edge.getProtocol());
-            data.put("port", edge.getTargetPort());
-            data.put("onAttackPath", attackPathEdgeIds.contains(edge.getEdgeId()));
-
+            data.put("id", pair.getKey());
+            data.put("source", graph.getEdgeSource(best).getId());
+            data.put("target", graph.getEdgeTarget(best).getId());
+            data.put("exploitProb", Math.round(best.getExploitProbability() * 1000.0) / 1000.0);
+            data.put("cve", best.getExploitedCve() != null ? best.getExploitedCve().cveId() : null);
+            data.put("cvss", best.getExploitedCve() != null ? best.getExploitedCve().cvssBaseScore() : 0);
+            data.put("protocol", best.getProtocol());
+            data.put("port", best.getTargetPort());
+            data.put("count", edges.size());
+            data.put("topCves", edges.stream().limit(3)
+                    .map(e -> e.getExploitedCve() != null ? e.getExploitedCve().cveId() : "reachability").toList());
+            data.put("onAttackPath", attackPathEdgeIds.contains(pair.getKey()));
+            if (attackPathEdgeIds.contains(pair.getKey())) {
+                data.put("label", (best.getExploitedCve() != null ? best.getExploitedCve().cveId() : "reachability")
+                        + "  P=" + String.format("%.2f", best.getExploitProbability()));
+            }
             elements.add(Map.of("group", "edges", "data", data));
         }
 
@@ -374,9 +396,11 @@ public class ScanOrchestrator {
                                    "cvss", p.bottleneckCve().cvssBaseScore(),
                                    "severity", p.bottleneckCve().severity(),
                                    "description", p.bottleneckCve().description()) : null);
-                    ps.put("edges", p.edges().stream()
-                            .map(ExploitEdge::getEdgeId)
-                            .collect(Collectors.toList()));
+                    List<String> pairIds = new ArrayList<>();
+                    for (int i = 0; i + 1 < p.hops().size(); i++) {
+                        pairIds.add(p.hops().get(i).getId() + ">" + p.hops().get(i + 1).getId());
+                    }
+                    ps.put("edges", pairIds);
                     return ps;
                 })
                 .collect(Collectors.toList());

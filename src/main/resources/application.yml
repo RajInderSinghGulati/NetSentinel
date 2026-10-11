@@ -5,6 +5,11 @@ server:
 spring:
   application:
     name: NetSentinel-AI
+  web:
+    resources:
+      cache:
+        cachecontrol:
+          no-cache: true     # always revalidate the dashboard files (no stale UI after an update)
   threads:
     virtual:
       enabled: true

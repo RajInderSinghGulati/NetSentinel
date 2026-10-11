@@ -911,6 +911,8 @@
         }
 
         function handleProgressEvent(data) {
+            // progress events are broadcast for every scan; only react to the one this page started
+            if (currentScanId && data.scanId && data.scanId !== currentScanId) return;
             const statusMap = {
                 'SCANNING':  { state: 'scanning', text: `Tier 1: Scanning...` },
                 'ENRICHING': { state: 'scanning', text: `Tier 2: CVE Matching...` },
@@ -980,31 +982,38 @@
                     { selector: 'node[vulnCount > 0]', style: { 'border-width': 3 } },
                     { selector: 'node[vulnCount > 2]', style: { 'border-width': 4, 'width': 48, 'height': 48 } },
                     // ── Attack Path Nodes ──
-                    { selector: 'node[onAttackPath]', style: { 'border-color': '#ef4444', 'border-width': 3 } },
+                    { selector: 'node[?onAttackPath]', style: { 'border-color': '#ef4444', 'border-width': 3 } },
                     // ── Edge Base Style ──
                     {
                         selector: 'edge',
                         style: {
-                            'width': 1.5,
-                            'line-color': '#2a3050',
-                            'target-arrow-color': '#2a3050',
+                            'width': 'mapData(exploitProb, 0, 1, 1.5, 6)',
+                            'line-color': '#475569',
+                            'target-arrow-color': '#475569',
                             'target-arrow-shape': 'triangle',
                             'curve-style': 'bezier',
                             'arrow-scale': 0.8,
-                            'opacity': 0.4,
+                            'opacity': 0.55,
                             'transition-property': 'line-color, width, opacity, target-arrow-color',
                             'transition-duration': '0.3s'
                         }
                     },
                     // ── Attack Path Edges ──
                     {
-                        selector: 'edge[onAttackPath]',
+                        selector: 'edge[?onAttackPath]',
                         style: {
                             'line-color': '#ef4444',
                             'target-arrow-color': '#ef4444',
-                            'width': 3,
-                            'opacity': 0.9,
-                            'line-style': 'solid'
+                            'width': 'mapData(exploitProb, 0, 1, 3, 7)',
+                            'opacity': 0.95,
+                            'line-style': 'solid',
+                            'label': 'data(label)',
+                            'font-size': '9px',
+                            'color': '#fca5a5',
+                            'text-background-color': '#0a0e1a',
+                            'text-background-opacity': 0.85,
+                            'text-background-padding': '2px',
+                            'text-rotation': 'autorotate'
                         }
                     },
                     // ── Selected ──
@@ -1044,6 +1053,7 @@
                 tooltip.innerHTML = `
                     ${cveLabel}
                     <div><span class="tt-label">P(exploit): </span><span class="tt-prob">${(d.exploitProb || 0).toFixed(3)}</span></div>
+                    ${d.count > 1 ? `<div><span class="tt-label">${d.count} CVEs on this link: </span>${(d.topCves || []).join(', ')}${d.count > 3 ? ', …' : ''}</div>` : ''}
                     <div><span class="tt-label">Protocol: </span>${d.protocol || 'TCP'} :${d.port || '?'}</div>
                 `;
                 tooltip.style.display = 'block';
@@ -1064,6 +1074,7 @@
         async function launchScan() {
             const cidr = document.getElementById('cidrInput').value;
             const btn = document.getElementById('scanBtn');
+            currentScanId = null;   // events of the previous scan must not be mistaken for this one
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span> Scanning...';
             setStatus('scanning', 'Initiating...');
@@ -1176,7 +1187,7 @@
         function renderGraph(data) {
             cy.elements().remove();
             cy.add(data.elements || []);
-            cy.layout({
+            const lay = cy.layout({
                 name: 'dagre',
                 rankDir: 'LR',
                 nodeSep: 60,
@@ -1186,7 +1197,10 @@
                 animate: true,
                 animationDuration: 800,
                 animationEasing: 'ease-out-cubic'
-            }).run();
+            });
+            // refit once the layout settles so the whole graph is visible
+            lay.one('layoutstop', () => { cy.resize(); cy.fit(undefined, 40); });
+            lay.run();
 
             (data.elements || []).filter(e => e.group === 'nodes').forEach(el => {
                 const d = el.data;
@@ -1349,20 +1363,39 @@
             renderRemediation(remediationData, opt);
         }
 
+        function fmtPct(p) {
+            if (p >= 99.95) return '100%';
+            return (p >= 99 || p < 1 ? p.toFixed(1) : p.toFixed(0)) + '%';
+        }
+
+        function fmtRisk(x) {
+            if (x === 0) return '0';
+            if (x >= 0.1) return x.toFixed(2);
+            if (x >= 0.001) return x.toFixed(4);
+            return x.toExponential(1);
+        }
+
         function renderRemediation(rem, opt) {
             const before = rem.riskBefore, after = rem.riskAfter;
             const pct = before > 0 ? (100 * (1 - after / before)) : 0;
-            const patches = (rem.patches || []).map((p, i) =>
-                `<div class="rem-patch"><b>${i + 1}.</b> ${escapeHtml(p)}</div>`).join('')
+            const patches = (rem.upgrades && rem.upgrades.length
+                ? rem.upgrades.map((u, i) =>
+                    `<div class="rem-patch"><b>${i + 1}.</b> ${escapeHtml(u.host)}: <b>${escapeHtml(u.product)}</b> `
+                    + `${escapeHtml(u.from)} → <b>${escapeHtml(u.toLabel)}</b><br>`
+                    + `<span style="color:var(--text-muted)">fixes ${u.fixes} CVEs`
+                    + `${u.remaining ? `, ${u.remaining} remain` : ''}${u.introduced ? `, ${u.introduced} new in target version` : ''}</span></div>`).join('')
+                : (rem.patches || []).map((p, i) =>
+                    `<div class="rem-patch"><b>${i + 1}.</b> ${escapeHtml(p)}</div>`).join(''))
                 || '<div class="rem-patch">No patches needed.</div>';
+            const nPatches = (rem.patches || []).length;
 
             document.getElementById('remediationContent').innerHTML = `
                 <div class="rem-card">
                     <div class="rem-title">Crown-jewel risk (known CVEs)</div>
                     <div class="rem-kpis">
-                        <div><div class="rem-kpi-value" style="color:var(--accent-red)">${before.toFixed(3)}</div><div class="rem-kpi-label">before</div></div>
-                        <div><div class="rem-kpi-value" style="color:var(--accent-green)">${after.toFixed(3)}</div><div class="rem-kpi-label">after ${rem.budget} patches</div></div>
-                        <div><div class="rem-kpi-value" style="color:var(--accent-cyan)">${pct.toFixed(0)}%</div><div class="rem-kpi-label">reduction (${escapeHtml(rem.strategy)})</div></div>
+                        <div><div class="rem-kpi-value" style="color:var(--accent-red)">${fmtRisk(before)}</div><div class="rem-kpi-label">before</div></div>
+                        <div><div class="rem-kpi-value" style="color:var(--accent-green)">${fmtRisk(after)}</div><div class="rem-kpi-label">after ${nPatches} patch${nPatches === 1 ? '' : 'es'}</div></div>
+                        <div><div class="rem-kpi-value" style="color:var(--accent-cyan)">${fmtPct(pct)}</div><div class="rem-kpi-label">reduction (${escapeHtml(rem.strategy)})</div></div>
                     </div>
                 </div>
                 <div class="rem-card">
@@ -1401,7 +1434,7 @@
         }
 
         function riskChartSvg(opt) {
-            const W = 360, H = 190, L = 38, R = 10, T = 10, B = 28;
+            const W = 360, H = 190, L = 46, R = 10, T = 10, B = 28;
             const rows = opt.curve;
             const maxB = rows[rows.length - 1].budget;
             const yMax = Math.max(opt.baselineRisk * 1.05, 1e-6);
@@ -1411,7 +1444,7 @@
             for (let i = 0; i <= 4; i++) {
                 const v = yMax * i / 4, yy = y(v);
                 g += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="#2a3050" stroke-width="1"/>` +
-                     `<text x="${L - 4}" y="${yy + 3}" fill="#64748b" font-size="9" text-anchor="end">${v.toFixed(2)}</text>`;
+                     `<text x="${L - 4}" y="${yy + 3}" fill="#64748b" font-size="9" text-anchor="end">${fmtRisk(v)}</text>`;
             }
             rows.forEach(r => {
                 g += `<text x="${x(r.budget)}" y="${H - 12}" fill="#64748b" font-size="9" text-anchor="middle">${r.budget}</text>`;
