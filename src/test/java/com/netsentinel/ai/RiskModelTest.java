@@ -8,6 +8,9 @@ import com.netsentinel.model.HostNode;
 import org.jgrapht.graph.DirectedWeightedMultigraph;
 import org.junit.jupiter.api.Test;
 
+import com.netsentinel.cve.CveDatabase;
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.util.List;
 import java.util.Map;
 
@@ -191,8 +194,113 @@ class RiskModelTest {
     }
 
     @Test
+    void optimalUsesAtMostBudgetAndPrefersTheSmallestSet() {
+        var optimizer = new PatchOptimizer(model);
+        var c = model.compile(chokepointGraph(), RiskModel.Variant.CORRELATED);
+        var plan = optimizer.plan(c, PatchOptimizer.Strategy.OPTIMAL, 3, 1);
+        assertEquals(1, plan.patches().size(), "one patch already reaches zero risk");
+        assertEquals("c-j", plan.patches().get(0).hostId());
+        assertTrue(optimizer.plan(c, PatchOptimizer.Strategy.OPTIMAL, 0, 1).patches().isEmpty());
+    }
+
+    @Test
     void searchSpaceGuard() {
         assertFalse(PatchOptimizer.binomialExceeds(10, 3, 1000));
         assertTrue(PatchOptimizer.binomialExceeds(60, 10, 3_000_000L));
+    }
+
+    // ------------------------------------------------------------------ fixed-in semantics
+
+    private CompromiseScorer scorer() {
+        CompromiseScorer sc = new CompromiseScorer();
+        ReflectionTestUtils.setField(sc, "modelPath", "/model/exploit_model.json");
+        ReflectionTestUtils.setField(sc, "knownExploitedProbability", 0.9);
+        try {
+            sc.initialize();
+        } catch (java.io.IOException e) {
+            throw new AssertionError(e);
+        }
+        return sc;
+    }
+
+    private static CveRecord rangedCve(String id, String bounds) {
+        return new CveRecord(id, id, 9.8, CveRecord.AttackVector.NETWORK, CveRecord.AttackComplexity.LOW,
+                CveRecord.PrivilegesRequired.NONE, CveRecord.UserInteraction.NONE, "CWE-78",
+                List.of("cpe:2.3:a:acme:srv:*:*:*:*:*:*:*:*#" + bounds), true, false);
+    }
+
+    private static CveDatabase dbReturning(Map<String, List<CveRecord>> byTargetVersion) {
+        return new CveDatabase() {
+            @Override
+            public List<CveRecord> findByCpe(String cpe) {
+                return byTargetVersion.getOrDefault(cpe.split(":")[5], List.of());
+            }
+
+            @Override
+            public List<CveRecord> findAll() {
+                return List.of();
+            }
+        };
+    }
+
+    private DirectedWeightedMultigraph<HostNode, ExploitEdge> singleHost(CveRecord installed, double p) {
+        HostNode ext = node("ext", NetworkTier.EXTERNAL, 0), w = node("w", NetworkTier.CROWN_JEWEL, 10);
+        w.addVulnerability(installed, "cpe:2.3:a:acme:srv:1.0:*:*:*:*:*:*:*");
+        var g = graph(ext, w);
+        edge(g, ext, w, installed, p);
+        return g;
+    }
+
+    @Test
+    void upgradeRemovesFixedCvesAndAddsCvesOfTheNewVersion() {
+        CveRecord a = rangedCve("A", "<2.0");          // fixed by upgrading to 2.0
+        CveRecord b = rangedCve("B", ">=2.0,<3.0");    // only affects the newer version
+        CompromiseScorer sc = scorer();
+        var model2 = new RiskModel(dbReturning(Map.of("2.0", List.of(b))), sc);
+        var g = singleHost(a, 0.9);
+
+        var c = model2.compile(g, RiskModel.Variant.CORRELATED);
+        assertEquals(1, c.units.size());
+        PatchUnit u = c.units.get(0);
+        assertEquals("2.0", u.targetVersion());
+        assertEquals(java.util.Set.of("A"), u.fixedCveIds());
+        assertEquals(1, u.introduced().size());
+
+        double before = model2.crownJewelRisk(c, new boolean[]{false});
+        double after = model2.crownJewelRisk(c, new boolean[]{true});
+        assertEquals(0.9, before, 1e-9);
+        assertEquals(sc.scoreEdge(b, 10), after, 1e-9, "after the upgrade only B can be exploited");
+        assertTrue(after < before);
+    }
+
+    @Test
+    void residualCveKeepsRiskAndUnpatchableUnitDoesNothing() {
+        CveRecord stays = rangedCve("ALL", "<99.0");    // still affects the next candidate? no: fixed only at 99.0
+        CveRecord open = new CveRecord("OPEN", "x", 9.8, CveRecord.AttackVector.NETWORK, CveRecord.AttackComplexity.LOW,
+                CveRecord.PrivilegesRequired.NONE, CveRecord.UserInteraction.NONE, "CWE-1",
+                List.of("cpe:2.3:a:acme:srv:*:*:*:*:*:*:*:*"), true, false);   // all versions: unfixable
+        var m = new RiskModel(dbReturning(Map.of("99.0", List.of(open))), scorer());
+        var g = singleHost(open, 0.7);
+        var c = m.compile(g, RiskModel.Variant.CORRELATED);
+        PatchUnit u = c.units.get(0);
+        assertFalse(u.fixesAnything());
+        assertNull(u.targetVersion());
+        assertEquals(0.7, m.crownJewelRisk(c, new boolean[]{true}), 1e-9, "unfixable CVE keeps the risk");
+
+        // a CVE that is fixed at 99.0 alongside an unfixable one: target 99.0, residual stays
+        var g2 = graph(node("ext", NetworkTier.EXTERNAL, 0), node("w", NetworkTier.CROWN_JEWEL, 10));
+        HostNode ext = g2.vertexSet().stream().filter(n -> n.getId().equals("ext")).findFirst().orElseThrow();
+        HostNode w = g2.vertexSet().stream().filter(n -> n.getId().equals("w")).findFirst().orElseThrow();
+        w.addVulnerability(stays, "cpe:2.3:a:acme:srv:1.0:*:*:*:*:*:*:*");
+        w.addVulnerability(open, "cpe:2.3:a:acme:srv:1.0:*:*:*:*:*:*:*");
+        edge(g2, ext, w, stays, 0.5);
+        edge(g2, ext, w, open, 0.4);
+        var c2 = m.compile(g2, RiskModel.Variant.CORRELATED);
+        PatchUnit u2 = c2.units.get(0);
+        assertEquals("99.0", u2.targetVersion());
+        assertEquals(java.util.Set.of("ALL"), u2.fixedCveIds());
+        double expectedBefore = 1 - (1 - 0.5) * (1 - 0.4);
+        assertEquals(expectedBefore, m.crownJewelRisk(c2, new boolean[]{false}), 1e-9);
+        assertEquals(0.4, m.crownJewelRisk(c2, new boolean[]{true}), 1e-9, "only the unfixable CVE remains");
     }
 }

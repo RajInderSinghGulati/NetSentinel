@@ -229,7 +229,7 @@ public class ScanOrchestrator {
     /** Outcome of applying a patch plan to the scanned inventory and re-running the pipeline. */
     public record PlanVerification(String strategy, int budget, List<String> patches,
                                    double baselineRisk, double predictedRisk, double rescanRisk,
-                                   int pathsBefore, int pathsAfter) {}
+                                   int pathsBefore, int pathsAfter, List<String> upgrades) {}
 
     /**
      * Applies a patch plan to the discovered inventory (the patched products are removed from each
@@ -245,14 +245,17 @@ public class ScanOrchestrator {
         PatchOptimizer.Plan plan = patchOptimizer.plan(compiled, strategy, budget, 42L);
         if (!plan.computed()) return Optional.empty();
 
-        Map<String, Set<String>> patched = new HashMap<>();
+        // installed CPE -> CPE after the upgrade (unchanged where no fixed release is known)
+        Map<String, Map<String, String>> upgraded = new HashMap<>();
         for (PatchUnit u : plan.patches()) {
-            patched.computeIfAbsent(u.hostId(), k -> new HashSet<>()).add(u.cpe());
+            if (u.targetCpe() != null) {
+                upgraded.computeIfAbsent(u.hostId(), k -> new HashMap<>()).put(u.cpe(), u.targetCpe());
+            }
         }
         List<HostFingerprint> after = scan.getDiscoveredHosts().stream()
                 .map(h -> new HostFingerprint(h.ip(), h.hostname(), h.openPorts(), h.banners(),
                         h.cpeStrings().stream()
-                                .filter(c -> !patched.getOrDefault(h.ip(), Set.of()).contains(c)).toList(),
+                                .map(c -> upgraded.getOrDefault(h.ip(), Map.of()).getOrDefault(c, c)).toList(),
                         h.osTag(), h.tier(), h.criticality()))
                 .toList();
 
@@ -264,7 +267,8 @@ public class ScanOrchestrator {
         return Optional.of(new PlanVerification(strategy.name(), plan.budget(),
                 plan.patches().stream().map(PatchUnit::label).toList(),
                 scan.getCrownJewelRisk(), plan.risk(), rescanRisk,
-                scan.getAttackPaths() == null ? 0 : scan.getAttackPaths().size(), pathsAfter));
+                scan.getAttackPaths() == null ? 0 : scan.getAttackPaths().size(), pathsAfter,
+                plan.patches().stream().map(PatchUnit::upgradeSummary).toList()));
     }
 
     /**

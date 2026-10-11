@@ -117,7 +117,7 @@ public class AttackGraphBuilder {
      * Determines if network traffic can flow from source tier to target tier.
      * Models enterprise firewall segmentation rules.
      */
-    private boolean canReach(NetworkTier source, NetworkTier target) {
+    public static boolean canReach(NetworkTier source, NetworkTier target) {
         return switch (source) {
             case EXTERNAL -> target == NetworkTier.DMZ;
             case DMZ -> target == NetworkTier.APPLICATION;

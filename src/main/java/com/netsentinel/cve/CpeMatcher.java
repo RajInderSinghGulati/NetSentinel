@@ -81,6 +81,41 @@ public final class CpeMatcher {
         if (!v.isMissingNode() && !v.asText("").isEmpty()) bounds.add(op + v.asText());
     }
 
+    /**
+     * Outcome of checking one affected entry against a concrete CPE.
+     *
+     * @param affected whether the entry covers the CPE
+     * @param fixedIn  smallest version that escapes this entry ({@code v + ".0.1"} means "any version after v"),
+     *                 or null if no version of this entry's line is known to be fixed
+     */
+    public record Fix(boolean affected, String fixedIn) {}
+
+    /** Version just above {@code v} that is below every real release after {@code v}. */
+    public static String successor(String v) {
+        return v + ".0.1";
+    }
+
+    /** True for versions produced by {@link #successor}; they mean "any release newer than the prefix". */
+    public static boolean isSuccessor(String v) {
+        return v.endsWith(".0.1");
+    }
+
+    public static Fix fixFor(String queryCpe, String affected) {
+        if (!matches(queryCpe, affected)) return new Fix(false, null);
+        String version = queryCpe.split(":")[5];
+        int hash = affected.indexOf(RANGE_SEP);
+        if (hash < 0) {
+            String entryVersion = affected.substring(0, affected.length()).split(":")[5];
+            // exact version entry: any other version is fine; wildcard: every version is affected
+            return isAny(entryVersion) ? new Fix(true, null) : new Fix(true, successor(version));
+        }
+        for (String bound : affected.substring(hash + 1).split(",")) {
+            if (bound.startsWith("<=")) return new Fix(true, successor(bound.substring(2)));
+            if (bound.startsWith("<")) return new Fix(true, bound.substring(1));
+        }
+        return new Fix(true, null); // only a start bound: nothing newer is known to be fixed
+    }
+
     private static boolean isAny(String f) {
         return f.equals("*") || f.equals("-") || f.isEmpty();
     }

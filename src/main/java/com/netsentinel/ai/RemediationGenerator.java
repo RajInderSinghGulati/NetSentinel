@@ -98,10 +98,10 @@ public class RemediationGenerator {
                 String version = version(u.cpe());
                 String cves = cveSummary(u);
                 Pkg pkg = PACKAGES.get(product);
-                if (pkg != null && !isWindows(u)) {
+                if (pkg != null && !isWindows(u) && u.fixesAnything()) {
                     String handler = "Restart " + product;
-                    sb.append("    - name: \"Upgrade ").append(product).append(" (fixes ").append(cves)
-                            .append(")\"  # noqa package-latest\n");
+                    sb.append("    - name: \"Upgrade ").append(product).append(" ").append(version).append(" to ")
+                            .append(toPhrase(u)).append(" (fixes ").append(cves).append(")\"  # noqa package-latest\n");
                     sb.append("      ansible.builtin.package:\n");
                     sb.append("        name: \"{{ '").append(pkg.apt()).append("' if ansible_os_family == 'Debian' else '")
                             .append(pkg.rpm()).append("' }}\"\n");
@@ -111,8 +111,11 @@ public class RemediationGenerator {
                         handlers.add(handler + "|" + pkg.aptService() + "|" + pkg.rpmService());
                     }
                 } else {
-                    sb.append("    - name: \"MANUAL - upgrade ").append(product).append(" ").append(version)
-                            .append(" (fixes ").append(cves).append(")\"\n");
+                    sb.append("    - name: \"MANUAL - ").append(u.fixesAnything()
+                                    ? "upgrade " + product + " " + version + " to " + toPhrase(u)
+                                            + " (fixes " + cves + ")"
+                                    : "no fixed release known for " + product + " " + version)
+                            .append("\"\n");
                     sb.append("      ansible.builtin.debug:\n");
                     sb.append("        msg: \"").append(manualAdvice(u, product, version)).append("\"\n");
                 }
@@ -133,13 +136,17 @@ public class RemediationGenerator {
     }
 
     private String manualAdvice(PatchUnit u, String product, String version) {
+        if (!u.fixesAnything()) {
+            return "No release that fixes the known CVEs of " + product + " " + version
+                    + " is known: apply vendor mitigations or restrict network access.";
+        }
         if (isWindows(u)) {
-            return "Windows host: apply the vendor update for " + product + " " + version + " via WSUS or the vendor installer.";
+            return "Windows host: update " + product + " " + version + " to " + toPhrase(u) + " via WSUS or the vendor installer.";
         }
         return switch (product) {
             case "log4j" -> "Application dependency: upgrade log4j-core to 2.17.1 or later in the application build and redeploy.";
             case "spring_boot" -> "Application dependency: upgrade Spring Boot in the application build and redeploy.";
-            default -> "No OS package mapping for " + product + " " + version + ": upgrade from the vendor repository or installer.";
+            default -> "No OS package mapping for " + product + " " + version + ": upgrade to " + toPhrase(u) + " from the vendor repository or installer.";
         };
     }
 
@@ -177,7 +184,7 @@ public class RemediationGenerator {
             for (PatchUnit u : units) {
                 String product = product(u.cpe());
                 Pkg pkg = PACKAGES.get(product);
-                if (pkg != null && !isWindows(u)) {
+                if (pkg != null && !isWindows(u) && u.fixesAnything()) {
                     sb.append("  echo \"[*] Upgrading ").append(product).append("\"\n");
                     sb.append("  upgrade_pkg \"").append(pkg.apt()).append("\" \"").append(pkg.rpm()).append("\"\n");
                     if (pkg.aptService() != null) {
@@ -208,13 +215,21 @@ public class RemediationGenerator {
         sb.append("Patches (apply in this order)\n-----------------------------\n");
         int i = 1;
         for (PatchUnit u : patches) {
-            sb.append(String.format("%d. %s - %s %s%n", i++, u.hostname(), product(u.cpe()), version(u.cpe())));
-            sb.append("     fixes ").append(u.cves().size()).append(" CVEs, highest CVSS ")
-                    .append(String.format("%.1f", u.maxCvss())).append(": ").append(cveSummary(u)).append("\n");
+            sb.append(String.format("%d. %s%n", i++, u.upgradeSummary()));
+            sb.append("     fixes: ").append(cveSummary(u)).append(String.format("  (highest CVSS %.1f)%n", u.maxCvss()));
+            if (!u.residualCves().isEmpty()) {
+                sb.append("     still affected after upgrade: ").append(u.residualCves().size()).append(" CVEs\n");
+            }
+            if (!u.introduced().isEmpty()) {
+                sb.append("     newly affecting the target version: ").append(u.introduced().size()).append(" CVEs\n");
+            }
             Pkg pkg = PACKAGES.get(product(u.cpe()));
-            sb.append("     ").append(pkg != null && !isWindows(u) ? "automated (package upgrade)" : "MANUAL action required").append("\n");
+            sb.append("     ").append(pkg != null && !isWindows(u) && u.fixesAnything()
+                    ? "automated (package upgrade; confirm the repository offers " + toPhrase(u) + ")"
+                    : "MANUAL action required").append("\n");
         }
-        long manual = patches.stream().filter(u -> PACKAGES.get(product(u.cpe())) == null || isWindows(u)).count();
+        long manual = patches.stream()
+                .filter(u -> PACKAGES.get(product(u.cpe())) == null || isWindows(u) || !u.fixesAnything()).count();
         sb.append("\n").append(manual).append(" of ").append(patches.size()).append(" patches need manual action.\n");
         sb.append("\nVerification\n------------\n");
         sb.append("1. ansible-playbook -i inventory.ini playbook.yml --check --diff\n");
@@ -246,11 +261,20 @@ public class RemediationGenerator {
         return u.hostname().replaceAll("[^A-Za-z0-9_]", "_");
     }
 
+    /** "version 8.6.3" or "a release newer than 2.4.50". */
+    private static String toPhrase(PatchUnit u) {
+        if (u.targetVersion() == null) return u.targetLabel();
+        return com.netsentinel.cve.CpeMatcher.isSuccessor(u.targetVersion())
+                ? "a release " + u.targetLabel() : "version " + u.targetVersion();
+    }
+
     private static String cveSummary(PatchUnit u) {
-        List<String> ids = u.cves().stream()
+        List<CveRecord> fixed = u.fixedCves();
+        if (fixed.isEmpty()) return "no CVEs";
+        List<String> ids = fixed.stream()
                 .sorted(Comparator.comparingDouble(CveRecord::cvssBaseScore).reversed())
                 .map(CveRecord::cveId).distinct().limit(3).toList();
-        int total = (int) u.cves().stream().map(CveRecord::cveId).distinct().count();
+        int total = (int) fixed.stream().map(CveRecord::cveId).distinct().count();
         return String.join(", ", ids) + (total > ids.size() ? " +" + (total - ids.size()) + " more" : "");
     }
 }

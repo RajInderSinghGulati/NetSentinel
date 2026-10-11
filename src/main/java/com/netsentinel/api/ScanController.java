@@ -182,6 +182,7 @@ public class ScanController {
                     body.put("riskBefore", scan.getCrownJewelRisk());
                     body.put("riskAfter", plan.risk());
                     body.put("patches", plan.patches().stream().map(PatchUnit::label).toList());
+                    body.put("upgrades", plan.patches().stream().map(ScanController::upgradeDetails).toList());
                     return ResponseEntity.ok(body);
                 })
                 .orElse(ResponseEntity.notFound().build());
@@ -232,6 +233,7 @@ public class ScanController {
                     cell.put("reductionPct", plan.computed() && baseline > 0
                             ? 100.0 * (1.0 - plan.risk() / baseline) : null);
                     cell.put("patches", plan.patches().stream().map(PatchUnit::label).toList());
+                    cell.put("upgrades", plan.patches().stream().map(PatchUnit::upgradeSummary).toList());
                     if (mcTrials > 0 && plan.computed() && s != PatchOptimizer.Strategy.RANDOM) {
                         boolean[] removed = new boolean[compiled.units.size()];
                         plan.patches().forEach(u -> removed[u.index()] = true);
@@ -263,6 +265,19 @@ public class ScanController {
                 })
                 .toList();
         return ResponseEntity.ok(scanList);
+    }
+
+    private static Map<String, Object> upgradeDetails(PatchUnit u) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("host", u.hostname());
+        m.put("product", u.product());
+        m.put("from", u.currentVersion());
+        m.put("to", u.targetVersion());
+        m.put("toLabel", u.targetLabel());
+        m.put("fixes", u.fixedCveIds().size());
+        m.put("remaining", u.cves().size() - u.fixedCveIds().size());
+        m.put("introduced", u.introduced().size());
+        return m;
     }
 
     private Map<String, Object> buildScanResponse(ScanResult result) {

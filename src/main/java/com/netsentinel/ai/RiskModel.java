@@ -1,10 +1,14 @@
 package com.netsentinel.ai;
 
+import com.netsentinel.cve.CveDatabase;
+import com.netsentinel.cve.UpgradePlanner;
+import com.netsentinel.graph.AttackGraphBuilder;
 import com.netsentinel.model.CveRecord;
 import com.netsentinel.model.ExploitEdge;
 import com.netsentinel.model.HostFingerprint.NetworkTier;
 import com.netsentinel.model.HostNode;
 import org.jgrapht.graph.DirectedWeightedMultigraph;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -35,6 +39,21 @@ public class RiskModel {
 
     public enum Variant { NOISY_OR, CORRELATED }
 
+    /** Used to look up the CVEs of a target version (null = assume upgrades introduce nothing). */
+    private final CveDatabase cveDatabase;
+    private final CompromiseScorer scorer;
+
+    @Autowired
+    public RiskModel(CveDatabase cveDatabase, CompromiseScorer scorer) {
+        this.cveDatabase = cveDatabase;
+        this.scorer = scorer;
+    }
+
+    /** Model without a CVE database: patches only remove CVEs. Used by unit tests on synthetic graphs. */
+    public RiskModel() {
+        this(null, null);
+    }
+
     /** One probabilistic exploit event that opens a target host to a set of source hosts. */
     static final class Group {
         final int target;
@@ -42,15 +61,26 @@ public class RiskModel {
         final double p;
         /** Patch units that fix this event; empty = cannot be patched. Removed once ALL are applied. */
         final int[] units;
+        /** Patch units that must ALL be applied for this event to exist (CVEs introduced by an upgrade). */
+        final int[] enabledBy;
 
         Group(int target, int[] sources, double p, int[] units) {
+            this(target, sources, p, units, new int[0]);
+        }
+
+        Group(int target, int[] sources, double p, int[] units, int[] enabledBy) {
             this.target = target;
             this.sources = sources;
             this.p = p;
             this.units = units;
+            this.enabledBy = enabledBy;
         }
 
         boolean active(boolean[] removed) {
+            if (enabledBy.length > 0) {
+                if (removed == null) return false;
+                for (int u : enabledBy) if (!removed[u]) return false;
+            }
             if (removed == null || units.length == 0) return true;
             for (int u : units) if (!removed[u]) return true;
             return false;
@@ -100,11 +130,36 @@ public class RiskModel {
             if (n.getFingerprint().tier() == NetworkTier.EXTERNAL) continue;
             for (var e : n.getVulnerabilitiesByCpe().entrySet()) {
                 if (e.getValue().isEmpty()) continue;
-                units.add(new PatchUnit(units.size(), n.getId(), n.getFingerprint().displayLabel(),
-                        e.getKey(), List.copyOf(e.getValue())));
+                units.add(planUnit(units.size(), n, e.getKey(), e.getValue()));
             }
         }
         return units;
+    }
+
+    /** Chooses the upgrade target for one (host, product) and works out what it fixes, leaves and adds. */
+    private PatchUnit planUnit(int index, HostNode host, String cpe, List<CveRecord> matched) {
+        List<CveRecord> cves = matched.stream().collect(java.util.stream.Collectors.collectingAndThen(
+                java.util.stream.Collectors.toMap(CveRecord::cveId, c -> c, (a, b) -> a, java.util.LinkedHashMap::new),
+                m -> List.copyOf(m.values())));
+        String hostLabel = host.getFingerprint().displayLabel();
+        UpgradePlanner.Upgrade up = UpgradePlanner.plan(cpe, cves);
+        if (!up.hasTarget()) {
+            return new PatchUnit(index, host.getId(), hostLabel, cpe, cves, null, null, up.targetLabel(), Set.of(), List.of());
+        }
+        Set<String> fixed = up.fixedCveIds();
+        List<CveRecord> introduced = List.of();
+        if (cveDatabase != null) {
+            // the database is authoritative for what affects the target version
+            Map<String, CveRecord> after = new LinkedHashMap<>();
+            for (CveRecord c : cveDatabase.findByCpe(up.targetCpe())) after.putIfAbsent(c.cveId(), c);
+            fixed = new LinkedHashSet<>();
+            for (CveRecord c : cves) if (!after.containsKey(c.cveId())) fixed.add(c.cveId());
+            Set<String> onHost = new HashSet<>();
+            host.getVulnerabilities().forEach(c -> onHost.add(c.cveId()));
+            introduced = after.values().stream().filter(c -> !onHost.contains(c.cveId())).toList();
+        }
+        return new PatchUnit(index, host.getId(), hostLabel, cpe, cves, up.targetVersion(), up.targetCpe(),
+                up.targetLabel(), fixed, introduced);
     }
 
     public Compiled compile(DirectedWeightedMultigraph<HostNode, ExploitEdge> graph, Variant variant) {
@@ -116,7 +171,7 @@ public class RiskModel {
         // (hostId|cveId) -> patch units fixing it
         Map<String, List<Integer>> fixedBy = new HashMap<>();
         for (PatchUnit u : units) {
-            for (CveRecord c : u.cves()) {
+            for (CveRecord c : u.fixedCves()) {
                 fixedBy.computeIfAbsent(u.hostId() + "|" + c.cveId(), k -> new ArrayList<>()).add(u.index());
             }
         }
@@ -130,6 +185,7 @@ public class RiskModel {
         Map<String, Double> pOf = new HashMap<>();
         Map<String, Integer> targetOf = new HashMap<>();
         Map<String, int[]> unitsOf = new HashMap<>();
+        Map<Integer, Set<Integer>> incoming = new HashMap<>();   // target -> sources already attacking it
         for (ExploitEdge e : sortedEdges(graph)) {
             int s = idx.get(graph.getEdgeSource(e));
             int t = idx.get(graph.getEdgeTarget(e));
@@ -148,6 +204,7 @@ public class RiskModel {
                         .stream().mapToInt(Integer::intValue).toArray();
             }
             sourcesOf.computeIfAbsent(key, k -> new ArrayList<>()).add(s);
+            incoming.computeIfAbsent(t, k -> new TreeSet<>()).add(s);
             pOf.putIfAbsent(key, e.getExploitProbability());
             targetOf.put(key, t);
             unitsOf.put(key, fixing);
@@ -163,6 +220,37 @@ public class RiskModel {
             perTarget.get(g.target).add(g);
             all.add(g);
         }
+        // CVEs an upgrade introduces: active only once that unit is applied
+        for (PatchUnit u : units) {
+            if (u.introduced().isEmpty()) continue;
+            int t = indexOfId(nodes, u.hostId());
+            int crit = nodes.get(t).getFingerprint().criticality();
+            // sources: whoever already attacks this host in the graph, plus whoever the tier rules allow
+            Set<Integer> srcSet = new TreeSet<>(incoming.getOrDefault(t, Set.of()));
+            for (int i = 0; i < n; i++) {
+                if (i != t && AttackGraphBuilder.canReach(nodes.get(i).getFingerprint().tier(),
+                        nodes.get(t).getFingerprint().tier())) srcSet.add(i);
+            }
+            List<Integer> srcs = new ArrayList<>(srcSet);
+            if (srcs.isEmpty()) continue;
+            for (CveRecord c : u.introduced()) {
+                if (c.attackVector() != CveRecord.AttackVector.NETWORK) continue;
+                double p = scorer == null ? 0.0 : scorer.scoreEdge(c, crit);
+                if (p <= 0) continue;
+                if (variant == Variant.CORRELATED) {
+                    Group g = new Group(t, srcs.stream().mapToInt(Integer::intValue).toArray(), p, new int[0], new int[]{u.index()});
+                    perTarget.get(t).add(g);
+                    all.add(g);
+                } else {
+                    for (int s : srcs) {
+                        Group g = new Group(t, new int[]{s}, p, new int[0], new int[]{u.index()});
+                        perTarget.get(t).add(g);
+                        all.add(g);
+                    }
+                }
+            }
+        }
+
         Group[][] byTarget = new Group[n][];
         for (int i = 0; i < n; i++) byTarget[i] = perTarget.get(i).toArray(new Group[0]);
 
@@ -260,6 +348,11 @@ public class RiskModel {
         double[] p = evaluate(c, null);
         for (int i = 0; i < p.length; i++) c.nodes.get(i).setCompromiseProbability(p[i]);
         return crownJewelRisk(c, p);
+    }
+
+    private static int indexOfId(List<HostNode> nodes, String id) {
+        for (int i = 0; i < nodes.size(); i++) if (nodes.get(i).getId().equals(id)) return i;
+        throw new IllegalStateException("unknown host " + id);
     }
 
     private static List<HostNode> sortedNodes(DirectedWeightedMultigraph<HostNode, ExploitEdge> graph) {
