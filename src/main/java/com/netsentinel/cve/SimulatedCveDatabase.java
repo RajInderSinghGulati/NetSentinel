@@ -45,15 +45,7 @@ public class SimulatedCveDatabase implements CveDatabase {
      * affected CPE prefix (vendor:product:version match).
      */
     private boolean cpeMatches(String queryCpe, String affectedCpe) {
-        // Extract vendor:product:version from both CPEs for comparison
-        String[] queryParts = queryCpe.split(":");
-        String[] affectedParts = affectedCpe.split(":");
-        if (queryParts.length < 6 || affectedParts.length < 6) return false;
-
-        // Match on vendor (index 3), product (index 4), version (index 5)
-        return queryParts[3].equals(affectedParts[3]) &&
-               queryParts[4].equals(affectedParts[4]) &&
-               queryParts[5].equals(affectedParts[5]);
+        return CpeMatcher.matches(queryCpe, affectedCpe);
     }
 
     /**

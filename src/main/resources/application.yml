@@ -21,6 +21,8 @@ netsentinel:
   graph:
     max-nodes: 500           # Maximum nodes in attack graph
   nvd:
+    snapshot-path: ""        # Pinned NVD snapshot file (default: classpath nvd/snapshot.json)
+    offline-only: false      # true = never call live NVD (reproducible runs)
     enabled: true            # Enable live NVD API v2 CVE lookups
     api-key: ""              # Optional — increases rate limit from 5 to 50 req/30s
     timeout-seconds: 3       # Per-request timeout before falling back to simulated DB

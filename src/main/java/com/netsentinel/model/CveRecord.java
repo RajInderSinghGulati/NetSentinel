@@ -19,6 +19,8 @@ import java.util.List;
  * @param affectedCpes      List of affected CPE strings
  * @param patchAvailable    Whether an official patch exists
  * @param exploitInWild     Whether active exploitation has been observed
+ * @param publishedYear     Year the CVE was published (0 if unknown); used for temporal train/test splits
+ * @param vendor            Primary vendor taken from the first affected CPE ("unknown" if none)
  */
 public record CveRecord(
         String cveId,
@@ -31,8 +33,51 @@ public record CveRecord(
         String cweId,
         List<String> affectedCpes,
         boolean patchAvailable,
-        boolean exploitInWild
+        boolean exploitInWild,
+        int publishedYear,
+        String vendor
 ) {
+
+    /** Convenience constructor: derives year from the CVE id and vendor from the first CPE. */
+    public CveRecord(String cveId, String description, double cvssBaseScore,
+                     AttackVector attackVector, AttackComplexity attackComplexity,
+                     PrivilegesRequired privilegesRequired, UserInteraction userInteraction,
+                     String cweId, List<String> affectedCpes,
+                     boolean patchAvailable, boolean exploitInWild) {
+        this(cveId, description, cvssBaseScore, attackVector, attackComplexity,
+                privilegesRequired, userInteraction, cweId, affectedCpes,
+                patchAvailable, exploitInWild,
+                yearFromId(cveId), vendorFromCpes(affectedCpes));
+    }
+
+    /** Copy with the vendor set to the product actually matched on a host. */
+    public CveRecord withVendor(String newVendor) {
+        return new CveRecord(cveId, description, cvssBaseScore, attackVector, attackComplexity,
+                privilegesRequired, userInteraction, cweId, affectedCpes,
+                patchAvailable, exploitInWild, publishedYear, newVendor);
+    }
+
+    public static int yearFromId(String cveId) {
+        String[] p = cveId == null ? new String[0] : cveId.split("-");
+        try {
+            return p.length >= 3 ? Integer.parseInt(p[1]) : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    public static String vendorFromCpes(List<String> cpes) {
+        if (cpes == null || cpes.isEmpty()) return "unknown";
+        // Most frequent vendor (ties: alphabetical) — the first CPE is often a downstream product.
+        java.util.Map<String, Integer> counts = new java.util.TreeMap<>();
+        for (String cpe : cpes) {
+            String[] parts = cpe.split(":");
+            if (parts.length > 3 && !parts[3].equals("*")) counts.merge(parts[3], 1, Integer::sum);
+        }
+        return counts.entrySet().stream()
+                .max(java.util.Map.Entry.comparingByValue())
+                .map(java.util.Map.Entry::getKey).orElse("unknown");
+    }
 
     public enum AttackVector { NETWORK, ADJACENT, LOCAL, PHYSICAL }
     public enum AttackComplexity { LOW, HIGH }

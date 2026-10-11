@@ -103,7 +103,7 @@ public class NvdApiClient {
     /**
      * Parses the NVD API v2 JSON response body into CveRecord instances.
      */
-    private List<CveRecord> parseNvdResponse(String json, String sourceCpe) {
+    public List<CveRecord> parseNvdResponse(String json, String sourceCpe) {
         List<CveRecord> results = new ArrayList<>();
         try {
             JsonNode root = objectMapper.readTree(json);
@@ -178,10 +178,20 @@ public class NvdApiClient {
         boolean exploitInWild = !cveNode.path("cisaExploitAdd").asText("").isBlank();
         boolean patchAvailable = !"Awaiting Analysis".equals(cveNode.path("vulnStatus").asText(""));
 
+        // Affected CPEs: prefer NVD configuration data (version ranges encoded by CpeMatcher);
+        // fall back to the CPE we queried with.
+        List<String> affected = CpeMatcher.extractAffected(cveNode);
+        if (affected.isEmpty() && sourceCpe != null) affected = List.of(sourceCpe);
+
+        String published = cveNode.path("published").asText("");
+        int year = published.length() >= 4 ? Integer.parseInt(published.substring(0, 4))
+                : CveRecord.yearFromId(cveId);
+
         return new CveRecord(
                 cveId, description, baseScore,
                 attackVector, attackComplexity, privilegesRequired, userInteraction,
-                cweId, List.of(sourceCpe), patchAvailable, exploitInWild
+                cweId, affected, patchAvailable, exploitInWild,
+                year, CveRecord.vendorFromCpes(sourceCpe != null ? List.of(sourceCpe) : affected)
         );
     }
 
