@@ -191,6 +191,9 @@ class LiveNetworkScannerTest {
     void cidrSweepFindsOnlyOpenPorts() throws Exception {
         // sweeping 127.0.0.1/32 on the default port list finds nothing unless something listens there
         LiveNetworkScanner scanner = scannerFor(Path.of(System.getProperty("java.io.tmpdir")), "hosts: []");
+        assertThrows(IllegalArgumentException.class,
+                () -> scanner.resolveTargets("127.0.0.1/32"), "sweeps must be opt-in");
+        ReflectionTestUtils.setField(scanner, "allowCidrSweep", true);
         List<HostFingerprint> hosts = scanner.scan(new ScanTarget("127.0.0.1/32", "live"), null).get();
         assertTrue(hosts.stream().allMatch(h -> h.tier() == NetworkTier.EXTERNAL || !h.openPorts().isEmpty()));
     }

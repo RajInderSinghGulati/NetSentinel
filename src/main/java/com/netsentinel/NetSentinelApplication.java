@@ -13,7 +13,8 @@ import org.springframework.scheduling.annotation.EnableAsync;
  * automated remediation playbooks.</p>
  *
  * <p>Built natively on Java 21 LTS with Project Loom virtual threads,
- * JGraphT for graph analysis, and Deeplearning4j for JVM-native AI.</p>
+ * JGraphT for graph analysis, and a gradient-boosted exploitability model trained offline
+ * and evaluated in plain Java.</p>
  */
 @SpringBootApplication
 @EnableAsync

@@ -63,6 +63,8 @@ public class RiskModel {
         final int[] units;
         /** Patch units that must ALL be applied for this event to exist (CVEs introduced by an upgrade). */
         final int[] enabledBy;
+        /** Index of this group's source set; groups of one target with equal sources share it. */
+        int sid;
 
         Group(int target, int[] sources, double p, int[] units) {
             this(target, sources, p, units, new int[0]);
@@ -97,9 +99,11 @@ public class RiskModel {
         final double[] jewelWeight;
         public final List<PatchUnit> units;
         public final Variant variant;
+        final int numSets;
+        final double[] unitMaxP;
 
         Compiled(List<HostNode> nodes, boolean[] isSource, Group[][] byTarget, Group[] allGroups,
-                 int[] crownJewels, double[] jewelWeight, List<PatchUnit> units, Variant variant) {
+                 int[] crownJewels, double[] jewelWeight, List<PatchUnit> units, Variant variant, int numSets) {
             this.nodes = nodes;
             this.isSource = isSource;
             this.byTarget = byTarget;
@@ -108,50 +112,69 @@ public class RiskModel {
             this.jewelWeight = jewelWeight;
             this.units = units;
             this.variant = variant;
+            this.numSets = numSets;
+            this.unitMaxP = new double[units.size()];
+            for (Group g : allGroups) for (int u : g.units) unitMaxP[u] = Math.max(unitMaxP[u], g.p);
         }
 
         public List<HostNode> nodes() { return nodes; }
 
+        /** Number of distinct exploit events in the compiled model. */
+        public int groupCount() { return allGroups.length; }
+
         /** Highest exploit probability among the exploit events a unit fixes (0 if it fixes no network exploit). */
         public double maxExploitProbability(int unit) {
-            double best = 0;
-            for (Group g : allGroups) {
-                for (int u : g.units) if (u == unit) best = Math.max(best, g.p);
-            }
-            return best;
+            return unitMaxP[unit];
         }
     }
 
     /** Patch units of a graph: one per (host, CPE) with at least one matched CVE, EXTERNAL excluded. */
     public List<PatchUnit> buildUnits(DirectedWeightedMultigraph<HostNode, ExploitEdge> graph) {
-        List<HostNode> nodes = sortedNodes(graph);
+        return buildUnits(sortedNodes(graph));
+    }
+
+    private List<PatchUnit> buildUnits(List<HostNode> nodes) {
         List<PatchUnit> units = new ArrayList<>();
+        // hosts running the same product with the same CVEs share one upgrade plan
+        Map<String, UpgradeEntry> memo = new HashMap<>();
         for (HostNode n : nodes) {
             if (n.getFingerprint().tier() == NetworkTier.EXTERNAL) continue;
             for (var e : n.getVulnerabilitiesByCpe().entrySet()) {
                 if (e.getValue().isEmpty()) continue;
-                units.add(planUnit(units.size(), n, e.getKey(), e.getValue()));
+                units.add(planUnit(units.size(), n, e.getKey(), e.getValue(), memo));
             }
         }
         return units;
     }
 
+    /** Host-independent part of an upgrade plan: the planner result and the CVEs of the target version. */
+    private record UpgradeEntry(UpgradePlanner.Upgrade upgrade, Map<String, CveRecord> afterByCve) {}
+
     /** Chooses the upgrade target for one (host, product) and works out what it fixes, leaves and adds. */
-    private PatchUnit planUnit(int index, HostNode host, String cpe, List<CveRecord> matched) {
+    private PatchUnit planUnit(int index, HostNode host, String cpe, List<CveRecord> matched,
+                               Map<String, UpgradeEntry> memo) {
         List<CveRecord> cves = matched.stream().collect(java.util.stream.Collectors.collectingAndThen(
                 java.util.stream.Collectors.toMap(CveRecord::cveId, c -> c, (a, b) -> a, java.util.LinkedHashMap::new),
                 m -> List.copyOf(m.values())));
         String hostLabel = host.getFingerprint().displayLabel();
-        UpgradePlanner.Upgrade up = UpgradePlanner.plan(cpe, cves);
+        String key = cpe + "#" + cves.stream().map(CveRecord::cveId).sorted().collect(java.util.stream.Collectors.joining(","));
+        UpgradeEntry entry = memo.computeIfAbsent(key, k -> {
+            UpgradePlanner.Upgrade u = UpgradePlanner.plan(cpe, cves);
+            Map<String, CveRecord> after = new LinkedHashMap<>();
+            if (u.hasTarget() && cveDatabase != null) {
+                // the database is authoritative for what affects the target version
+                for (CveRecord c : cveDatabase.findByCpe(u.targetCpe())) after.putIfAbsent(c.cveId(), c);
+            }
+            return new UpgradeEntry(u, after);
+        });
+        UpgradePlanner.Upgrade up = entry.upgrade();
         if (!up.hasTarget()) {
             return new PatchUnit(index, host.getId(), hostLabel, cpe, cves, null, null, up.targetLabel(), Set.of(), List.of());
         }
         Set<String> fixed = up.fixedCveIds();
         List<CveRecord> introduced = List.of();
         if (cveDatabase != null) {
-            // the database is authoritative for what affects the target version
-            Map<String, CveRecord> after = new LinkedHashMap<>();
-            for (CveRecord c : cveDatabase.findByCpe(up.targetCpe())) after.putIfAbsent(c.cveId(), c);
+            Map<String, CveRecord> after = entry.afterByCve();
             fixed = new LinkedHashSet<>();
             for (CveRecord c : cves) if (!after.containsKey(c.cveId())) fixed.add(c.cveId());
             Set<String> onHost = new HashSet<>();
@@ -168,24 +191,13 @@ public class RiskModel {
         for (int i = 0; i < nodes.size(); i++) idx.put(nodes.get(i), i);
         List<PatchUnit> units = buildUnits(graph);
 
-        // (hostId|cveId) -> patch units fixing it
-        Map<String, List<Integer>> fixedBy = new HashMap<>();
-        for (PatchUnit u : units) {
-            for (CveRecord c : u.fixedCves()) {
-                fixedBy.computeIfAbsent(u.hostId() + "|" + c.cveId(), k -> new ArrayList<>()).add(u.index());
-            }
-        }
-
-        int n = nodes.size();
-        boolean[] isSource = new boolean[n];
-        for (int i = 0; i < n; i++) isSource[i] = nodes.get(i).getFingerprint().tier() == NetworkTier.EXTERNAL;
+        Map<String, List<Integer>> fixedBy = fixedByIndex(units);
 
         // Collect edges per target; CORRELATED merges by (target, cve), NOISY_OR keeps each edge.
         Map<String, List<Integer>> sourcesOf = new LinkedHashMap<>();
         Map<String, Double> pOf = new HashMap<>();
         Map<String, Integer> targetOf = new HashMap<>();
         Map<String, int[]> unitsOf = new HashMap<>();
-        Map<Integer, Set<Integer>> incoming = new HashMap<>();   // target -> sources already attacking it
         for (ExploitEdge e : sortedEdges(graph)) {
             int s = idx.get(graph.getEdgeSource(e));
             int t = idx.get(graph.getEdgeTarget(e));
@@ -204,33 +216,108 @@ public class RiskModel {
                         .stream().mapToInt(Integer::intValue).toArray();
             }
             sourcesOf.computeIfAbsent(key, k -> new ArrayList<>()).add(s);
-            incoming.computeIfAbsent(t, k -> new TreeSet<>()).add(s);
             pOf.putIfAbsent(key, e.getExploitProbability());
             targetOf.put(key, t);
             unitsOf.put(key, fixing);
         }
 
-        List<List<Group>> perTarget = new ArrayList<>();
-        for (int i = 0; i < n; i++) perTarget.add(new ArrayList<>());
-        List<Group> all = new ArrayList<>();
+        List<Group> base = new ArrayList<>();
         for (var en : sourcesOf.entrySet()) {
             String k = en.getKey();
             int[] src = en.getValue().stream().distinct().mapToInt(Integer::intValue).toArray();
-            Group g = new Group(targetOf.get(k), src, pOf.get(k), unitsOf.get(k));
+            base.add(new Group(targetOf.get(k), src, pOf.get(k), unitsOf.get(k)));
+        }
+        return assemble(nodes, units, base, variant);
+    }
+
+    /**
+     * Same model as {@link #compile} for graphs built by {@link AttackGraphBuilder}, but derived directly from
+     * the hosts and the tier reachability rules, without materialising one edge per (source, target, CVE).
+     * Memory and time then grow with hosts x CVEs instead of hosts^2 x CVEs. CORRELATED variant only.
+     */
+    public Compiled compileImplicit(Collection<HostNode> hostNodes) {
+        if (scorer == null) throw new IllegalStateException("compileImplicit needs a CompromiseScorer");
+        List<HostNode> nodes = new ArrayList<>(hostNodes);
+        nodes.sort(Comparator.comparing(HostNode::getId));
+        List<PatchUnit> units = buildUnits(nodes);
+        Map<String, List<Integer>> fixedBy = fixedByIndex(units);
+
+        int n = nodes.size();
+        List<Group> base = new ArrayList<>();
+        for (int t = 0; t < n; t++) {
+            HostNode host = nodes.get(t);
+            NetworkTier tier = host.getFingerprint().tier();
+            if (tier == NetworkTier.EXTERNAL) continue;
+            int[] srcs = tierSources(nodes, t);
+            if (srcs.length == 0) continue;
+            Set<String> seen = new HashSet<>();
+            for (CveRecord cve : host.getVulnerabilities()) {
+                if (cve.attackVector() != CveRecord.AttackVector.NETWORK || !seen.add(cve.cveId())) continue;
+                int[] fixing = fixedBy.getOrDefault(host.getId() + "|" + cve.cveId(), List.of())
+                        .stream().mapToInt(Integer::intValue).toArray();
+                base.add(new Group(t, srcs, scorer.scoreEdge(cve, host.getFingerprint().criticality()), fixing));
+            }
+        }
+        return assemble(nodes, units, base, Variant.CORRELATED);
+    }
+
+    private static int[] tierSources(List<HostNode> nodes, int target) {
+        NetworkTier tt = nodes.get(target).getFingerprint().tier();
+        return java.util.stream.IntStream.range(0, nodes.size())
+                .filter(i -> i != target && AttackGraphBuilder.canReach(nodes.get(i).getFingerprint().tier(), tt))
+                .toArray();
+    }
+
+    /**
+     * "host|cve" -> patch units that must all be applied for the CVE to disappear. A CVE can be matched
+     * through several products of one host; if any of them cannot fix it, it never disappears, so such keys
+     * are left out (the group is then unpatchable).
+     */
+    private static Map<String, List<Integer>> fixedByIndex(List<PatchUnit> units) {
+        Map<String, List<Integer>> fixedBy = new HashMap<>();
+        Set<String> unfixable = new HashSet<>();
+        for (PatchUnit u : units) {
+            for (CveRecord c : u.cves()) {
+                String key = u.hostId() + "|" + c.cveId();
+                if (u.fixedCveIds().contains(c.cveId())) {
+                    fixedBy.computeIfAbsent(key, k -> new ArrayList<>()).add(u.index());
+                } else {
+                    unfixable.add(key);
+                }
+            }
+        }
+        unfixable.forEach(fixedBy::remove);
+        return fixedBy;
+    }
+
+    /** Adds the CVEs that upgrades introduce, shares equal source sets between a target's groups, and packs arrays. */
+    private Compiled assemble(List<HostNode> nodes, List<PatchUnit> units, List<Group> base, Variant variant) {
+        int n = nodes.size();
+        boolean[] isSource = new boolean[n];
+        for (int i = 0; i < n; i++) isSource[i] = nodes.get(i).getFingerprint().tier() == NetworkTier.EXTERNAL;
+
+        Map<Integer, Set<Integer>> incoming = new HashMap<>();   // target -> sources already attacking it
+        for (Group g : base) {
+            Set<Integer> in = incoming.computeIfAbsent(g.target, k -> new TreeSet<>());
+            for (int s : g.sources) in.add(s);
+        }
+
+        List<List<Group>> perTarget = new ArrayList<>();
+        for (int i = 0; i < n; i++) perTarget.add(new ArrayList<>());
+        List<Group> all = new ArrayList<>();
+        for (Group g : base) {
             perTarget.get(g.target).add(g);
             all.add(g);
         }
+
         // CVEs an upgrade introduces: active only once that unit is applied
         for (PatchUnit u : units) {
             if (u.introduced().isEmpty()) continue;
             int t = indexOfId(nodes, u.hostId());
             int crit = nodes.get(t).getFingerprint().criticality();
-            // sources: whoever already attacks this host in the graph, plus whoever the tier rules allow
+            // sources: whoever already attacks this host, plus whoever the tier rules allow
             Set<Integer> srcSet = new TreeSet<>(incoming.getOrDefault(t, Set.of()));
-            for (int i = 0; i < n; i++) {
-                if (i != t && AttackGraphBuilder.canReach(nodes.get(i).getFingerprint().tier(),
-                        nodes.get(t).getFingerprint().tier())) srcSet.add(i);
-            }
+            for (int i : tierSources(nodes, t)) srcSet.add(i);
             List<Integer> srcs = new ArrayList<>(srcSet);
             if (srcs.isEmpty()) continue;
             for (CveRecord c : u.introduced()) {
@@ -251,6 +338,10 @@ public class RiskModel {
             }
         }
 
+        // equal source sets share one id so evaluate() computes "does any source reach this target" once
+        Map<IntArrayKey, Integer> sets = new HashMap<>();
+        for (Group g : all) g.sid = sets.computeIfAbsent(new IntArrayKey(g.sources), k -> sets.size());
+
         Group[][] byTarget = new Group[n][];
         for (int i = 0; i < n; i++) byTarget[i] = perTarget.get(i).toArray(new Group[0]);
 
@@ -261,7 +352,27 @@ public class RiskModel {
         int[] jw = jewels.stream().mapToInt(Integer::intValue).toArray();
         double[] w = jewels.stream().mapToDouble(i -> nodes.get(i).getFingerprint().criticality() / 10.0).toArray();
 
-        return new Compiled(nodes, isSource, byTarget, all.toArray(new Group[0]), jw, w, units, variant);
+        return new Compiled(nodes, isSource, byTarget, all.toArray(new Group[0]), jw, w, units, variant, sets.size());
+    }
+
+    private static final class IntArrayKey {
+        private final int[] a;
+        private final int hash;
+
+        IntArrayKey(int[] a) {
+            this.a = a;
+            this.hash = Arrays.hashCode(a);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof IntArrayKey k && Arrays.equals(a, k.a);
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
     }
 
     /**
@@ -274,15 +385,26 @@ public class RiskModel {
         double[] p = new double[n];
         for (int i = 0; i < n; i++) if (c.isSource[i]) p[i] = 1.0;
 
+        double[] noReachOf = new double[c.numSets];   // per source set, valid while stamp == current target tick
+        int[] stamp = new int[c.numSets];
+        int tick = 0;
         for (int iter = 0; iter < 500; iter++) {
             double delta = 0;
             for (int t = 0; t < n; t++) {
                 if (c.isSource[t]) continue;
+                tick++;
                 double survive = 1.0;
                 for (Group g : c.byTarget[t]) {
                     if (!g.active(removed)) continue;
-                    double noReach = 1.0;
-                    for (int s : g.sources) noReach *= 1.0 - p[s];
+                    double noReach;
+                    if (stamp[g.sid] == tick) {
+                        noReach = noReachOf[g.sid];
+                    } else {
+                        noReach = 1.0;
+                        for (int s : g.sources) noReach *= 1.0 - p[s];
+                        noReachOf[g.sid] = noReach;
+                        stamp[g.sid] = tick;
+                    }
                     survive *= 1.0 - g.p * (1.0 - noReach);
                 }
                 double next = 1.0 - survive;
@@ -344,7 +466,11 @@ public class RiskModel {
 
     /** Writes node compromise probabilities (CORRELATED unless told otherwise) back onto the graph nodes. */
     public double applyToGraph(DirectedWeightedMultigraph<HostNode, ExploitEdge> graph, Variant variant) {
-        Compiled c = compile(graph, variant);
+        return applyTo(compile(graph, variant));
+    }
+
+    /** Evaluates an already compiled model, stores each host's probability on its node, returns crown-jewel risk. */
+    public double applyTo(Compiled c) {
         double[] p = evaluate(c, null);
         for (int i = 0; i < p.length; i++) c.nodes.get(i).setCompromiseProbability(p[i]);
         return crownJewelRisk(c, p);

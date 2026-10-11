@@ -36,6 +36,10 @@ public class AttackGraphBuilder {
 
     private final CveDatabase cveDatabase;
 
+    /** One edge per (source, target, CVE) grows quadratically with hosts; fail clearly instead of running out of memory. */
+    @org.springframework.beans.factory.annotation.Value("${netsentinel.graph.max-edges:3000000}")
+    private long maxEdges;
+
     public AttackGraphBuilder(CveDatabase cveDatabase) {
         this.cveDatabase = cveDatabase;
     }
@@ -46,6 +50,22 @@ public class AttackGraphBuilder {
      * @param fingerprints List of discovered host fingerprints from Tier 1
      * @return The constructed attack graph with CVE-enriched nodes and weighted edges
      */
+    /**
+     * Nodes only: hosts enriched with their matched CVEs, without any edges. Enough for
+     * {@code RiskModel.compileImplicit}, which derives reachability from the tier rules directly.
+     */
+    public List<HostNode> buildNodes(List<HostFingerprint> fingerprints) {
+        List<HostNode> nodes = new ArrayList<>();
+        for (HostFingerprint fp : fingerprints) {
+            HostNode node = new HostNode(fp.ip(), fp);
+            for (String cpe : fp.cpeStrings()) {
+                for (CveRecord cve : cveDatabase.findByCpe(cpe)) node.addVulnerability(cve, cpe);
+            }
+            nodes.add(node);
+        }
+        return nodes;
+    }
+
     public AttackGraphResult buildGraph(List<HostFingerprint> fingerprints) {
         log.info("▶ Building attack graph from {} discovered hosts", fingerprints.size());
 
@@ -99,6 +119,11 @@ public class AttackGraphBuilder {
                                     "remote"
                             );
                             graph.addEdge(source, target, edge);
+                            if (edgeCount > maxEdges) {
+                                throw new IllegalStateException("attack graph exceeds " + maxEdges + " edges ("
+                                        + fingerprints.size() + " hosts); raise netsentinel.graph.max-edges, scan a smaller scope, "
+                                        + "or use the graph-free risk model (RiskModel.compileImplicit)");
+                            }
                             // Placeholder weight; CompromiseScorer sets -ln(p) once probabilities are known
                             graph.setEdgeWeight(edge, 1.0 - cve.exploitabilityScore() + 0.01);
                         }

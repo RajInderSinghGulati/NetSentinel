@@ -74,12 +74,14 @@ public class CompromiseScorer {
         log.info("▶ Scoring {} edges with learned exploitability model...", graph.edgeSet().size());
         int scored = 0;
 
+        // an edge's probability depends only on its CVE, so score each distinct CVE once
+        java.util.Map<String, Double> byCve = new java.util.HashMap<>();
         for (ExploitEdge edge : graph.edgeSet()) {
             HostNode target = graph.getEdgeTarget(edge);
-            double probability = scoreEdge(
-                    edge.getExploitedCve(),
-                    target.getFingerprint().criticality()
-            );
+            CveRecord cve = edge.getExploitedCve();
+            double probability = cve == null
+                    ? scoreEdge(null, 0)
+                    : byCve.computeIfAbsent(cve.cveId(), id -> scoreEdge(cve, target.getFingerprint().criticality()));
             edge.setExploitProbability(probability);
             graph.setEdgeWeight(edge, -Math.log(probability));
             scored++;

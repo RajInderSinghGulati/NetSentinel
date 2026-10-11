@@ -303,4 +303,31 @@ class RiskModelTest {
         assertEquals(expectedBefore, m.crownJewelRisk(c2, new boolean[]{false}), 1e-9);
         assertEquals(0.4, m.crownJewelRisk(c2, new boolean[]{true}), 1e-9, "only the unfixable CVE remains");
     }
+
+    @Test
+    void cveMatchedThroughTwoProductsStaysWhileEitherProductStillHasIt() {
+        // CVE X affects product A below 2.0 (fixable) and product B in every version (not fixable)
+        CveRecord x = new CveRecord("X", "x", 9.8, CveRecord.AttackVector.NETWORK, CveRecord.AttackComplexity.LOW,
+                CveRecord.PrivilegesRequired.NONE, CveRecord.UserInteraction.NONE, "CWE-1",
+                List.of("cpe:2.3:a:acme:prodA:*:*:*:*:*:*:*:*#<2.0", "cpe:2.3:a:acme:prodB:*:*:*:*:*:*:*:*"), true, false);
+        HostNode ext = node("ext", NetworkTier.EXTERNAL, 0), w = node("w", NetworkTier.CROWN_JEWEL, 10);
+        w.addVulnerability(x, "cpe:2.3:a:acme:prodA:1.0:*:*:*:*:*:*:*");
+        w.addVulnerability(x, "cpe:2.3:a:acme:prodB:1.0:*:*:*:*:*:*:*");
+        var g = graph(ext, w);
+        edge(g, ext, w, x, 0.6);
+
+        var c = model.compile(g, RiskModel.Variant.CORRELATED);
+        assertEquals(2, c.units.size());
+        PatchUnit a = c.units.stream().filter(u -> u.cpe().contains("prodA")).findFirst().orElseThrow();
+        PatchUnit b = c.units.stream().filter(u -> u.cpe().contains("prodB")).findFirst().orElseThrow();
+        assertTrue(a.fixedCveIds().contains("X"));
+        assertFalse(b.fixedCveIds().contains("X"));
+
+        boolean[] onlyA = new boolean[2];
+        onlyA[a.index()] = true;
+        boolean[] both = {true, true};
+        assertEquals(0.6, model.crownJewelRisk(c, new boolean[2]), 1e-9);
+        assertEquals(0.6, model.crownJewelRisk(c, onlyA), 1e-9, "product B still carries CVE X");
+        assertEquals(0.6, model.crownJewelRisk(c, both), 1e-9, "B can never be fixed, so X stays");
+    }
 }

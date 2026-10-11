@@ -31,7 +31,8 @@ import java.util.function.Consumer;
 public class SimulatedNetworkScanner implements NetworkScanner {
 
     private static final Logger log = LoggerFactory.getLogger(SimulatedNetworkScanner.class);
-    private static final int SIMULATED_DELAY_MS = 150;
+    @org.springframework.beans.factory.annotation.Value("${netsentinel.scan.simulated-delay-ms:150}")
+    private int simulatedDelayMs = 150;
 
     @Override
     public String mode() {
@@ -80,7 +81,7 @@ public class SimulatedNetworkScanner implements NetworkScanner {
     private void simulateProbe(HostFingerprint host) {
         try {
             // Simulate variable latency based on number of open ports
-            int delay = SIMULATED_DELAY_MS + (host.openPorts().size() * 20);
+            int delay = simulatedDelayMs <= 0 ? 0 : simulatedDelayMs + (host.openPorts().size() * 20);
             Thread.sleep(delay);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

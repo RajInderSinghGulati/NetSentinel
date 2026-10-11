@@ -72,7 +72,23 @@ public class AttackPathAnalyzer {
                 .map(n -> n.getFingerprint().hostname()).collect(Collectors.joining(", ")));
 
         // Run Yen's algorithm for each entry→target pair
-        YenKShortestPath<HostNode, ExploitEdge> yenAlg = new YenKShortestPath<>(graph);
+        // Yen's cost grows with the edge count, and parallel CVE edges between the same two hosts only
+        // differ in probability: search a graph with the single most likely edge per host pair, so the
+        // top-K are distinct host routes rather than CVE variants of one route.
+        var routeGraph = new org.jgrapht.graph.SimpleDirectedWeightedGraph<HostNode, ExploitEdge>(ExploitEdge.class);
+        graph.vertexSet().forEach(routeGraph::addVertex);
+        for (ExploitEdge e : graph.edgeSet()) {
+            HostNode s = graph.getEdgeSource(e), t = graph.getEdgeTarget(e);
+            ExploitEdge best = routeGraph.getEdge(s, t);
+            if (best == null || graph.getEdgeWeight(e) < routeGraph.getEdgeWeight(best)) {
+                if (best != null) routeGraph.removeEdge(best);
+                ExploitEdge copy = new ExploitEdge(e.getEdgeId(), e.getExploitedCve(), e.getProtocol(),
+                        e.getTargetPort(), e.getExploitProbability(), e.getAccessLevel());
+                routeGraph.addEdge(s, t, copy);
+                routeGraph.setEdgeWeight(copy, graph.getEdgeWeight(e));
+            }
+        }
+        YenKShortestPath<HostNode, ExploitEdge> yenAlg = new YenKShortestPath<>(routeGraph);
         List<AttackPath> allPaths = new ArrayList<>();
         int pathCounter = 0;
 

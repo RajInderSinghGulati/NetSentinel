@@ -46,6 +46,10 @@ public class LiveNetworkScanner implements NetworkScanner {
     @Value("${netsentinel.scan.live.inventory:lab/inventory.yml}")
     private String inventoryPath;
 
+    /** CIDR sweeps of private ranges are off by default: the API is unauthenticated, so only the declared inventory may be probed. */
+    @Value("${netsentinel.scan.live.allow-cidr-sweep:false}")
+    private boolean allowCidrSweep;
+
     @Value("${netsentinel.scan.live.connect-timeout-ms:400}")
     private int connectTimeoutMs;
 
@@ -97,6 +101,10 @@ public class LiveNetworkScanner implements NetworkScanner {
             } catch (IOException e) {
                 throw new IllegalStateException("cannot read live inventory " + inventoryPath + ": " + e.getMessage(), e);
             }
+        }
+        if (!allowCidrSweep) {
+            throw new IllegalArgumentException("CIDR sweeps are disabled; scan the declared inventory (target 'lab') or set "
+                    + "netsentinel.scan.live.allow-cidr-sweep=true");
         }
         List<String> addresses = expandCidr(t);
         List<LiveInventory.Entry> out = new ArrayList<>();

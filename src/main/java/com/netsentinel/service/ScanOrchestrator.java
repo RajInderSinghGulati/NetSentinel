@@ -50,6 +50,10 @@ public class ScanOrchestrator {
     @Value("${netsentinel.scan.mode:simulated}")
     private String defaultScanMode;
 
+    /** Number of attack paths to report. */
+    @Value("${netsentinel.ai.k-paths:5}")
+    private int kPaths;
+
     /** Number of patches the automatic remediation plan may use. */
     @Value("${netsentinel.remediation.budget:3}")
     private int remediationBudget;
@@ -157,11 +161,12 @@ public class ScanOrchestrator {
             compromiseScorer.scoreGraphEdges(graphResult.graph());
 
             // Host compromise probabilities (correlated-exploit model) and crown-jewel risk
-            result.setCrownJewelRisk(riskModel.applyToGraph(graphResult.graph(), RiskModel.Variant.CORRELATED));
+            var compiled = riskModel.compile(graphResult.graph(), RiskModel.Variant.CORRELATED);
+            result.setCrownJewelRisk(riskModel.applyTo(compiled));
 
             // Find attack paths
             List<AttackPath> attackPaths = pathAnalyzer.findTopKAttackPaths(
-                    graphResult.graph(), graphResult.nodeMap(), 5);
+                    graphResult.graph(), graphResult.nodeMap(), kPaths);
 
             result.setAttackPaths(attackPaths);
 
@@ -185,7 +190,6 @@ public class ScanOrchestrator {
             broadcastProgress(result);
 
             // Pick the patch set (exact optimum when the search is small enough, else greedy)
-            var compiled = riskModel.compile(graphResult.graph(), RiskModel.Variant.CORRELATED);
             var plan = patchOptimizer.plan(compiled, PatchOptimizer.Strategy.OPTIMAL, remediationBudget, 42L);
             if (!plan.computed()) {
                 plan = patchOptimizer.plan(compiled, PatchOptimizer.Strategy.GREEDY, remediationBudget, 42L);
@@ -262,7 +266,7 @@ public class ScanOrchestrator {
         AttackGraphResult rebuilt = graphBuilder.buildGraph(after);
         compromiseScorer.scoreGraphEdges(rebuilt.graph());
         double rescanRisk = riskModel.applyToGraph(rebuilt.graph(), RiskModel.Variant.CORRELATED);
-        int pathsAfter = pathAnalyzer.findTopKAttackPaths(rebuilt.graph(), rebuilt.nodeMap(), 5).size();
+        int pathsAfter = pathAnalyzer.findTopKAttackPaths(rebuilt.graph(), rebuilt.nodeMap(), kPaths).size();
 
         return Optional.of(new PlanVerification(strategy.name(), plan.budget(),
                 plan.patches().stream().map(PatchUnit::label).toList(),

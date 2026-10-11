@@ -43,6 +43,10 @@ public class NvdApiClient {
     @Value("${netsentinel.nvd.api-key:}")
     private String apiKey;
 
+    /** Results per request; the NVD maximum is 2000. A small page silently drops CVEs. */
+    @Value("${netsentinel.nvd.page-size:2000}")
+    private int pageSize;
+
     @Value("${netsentinel.nvd.timeout-seconds:3}")
     private int timeoutSeconds;
 
@@ -67,7 +71,7 @@ public class NvdApiClient {
      */
     public CompletableFuture<List<CveRecord>> fetchByCpe(String cpeString) {
         String encodedCpe = URLEncoder.encode(cpeString, StandardCharsets.UTF_8);
-        String url = baseUrl + "?cpeName=" + encodedCpe + "&resultsPerPage=5";
+        String url = baseUrl + "?cpeName=" + encodedCpe + "&resultsPerPage=" + pageSize;
 
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
