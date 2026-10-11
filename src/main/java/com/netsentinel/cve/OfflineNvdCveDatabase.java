@@ -64,14 +64,9 @@ public class OfflineNvdCveDatabase implements CveDatabase {
 
     @Override
     public List<CveRecord> findByCpe(String cpeString) {
-        return cache.computeIfAbsent(cpeString, q -> {
-            // A CVE can affect many vendors (e.g. Log4Shell); report the matched host's vendor.
-            String vendor = CveRecord.vendorFromCpes(List.of(q));
-            return records.stream()
-                    .filter(cve -> cve.affectedCpes().stream().anyMatch(a -> CpeMatcher.matches(q, a)))
-                    .map(cve -> cve.withVendor(vendor))
-                    .toList();
-        });
+        return cache.computeIfAbsent(cpeString, q -> records.stream()
+                .filter(cve -> cve.affectedCpes().stream().anyMatch(a -> CpeMatcher.matches(q, a)))
+                .toList());
     }
 
     @Override

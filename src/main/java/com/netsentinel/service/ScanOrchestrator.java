@@ -121,7 +121,7 @@ public class ScanOrchestrator {
             // TIER 3: AI Scoring & Path Analysis
             // ════════════════════════════════════════
             result.setStatus(ScanResult.Status.ANALYZING);
-            result.setStatusMessage("Tier 3: Running DL4J compromise scorer and Yen's K-SP...");
+            result.setStatusMessage("Tier 3: Running learned exploitability scorer and Yen's K-SP...");
             broadcastProgress(result);
 
             // Score edges with MLP

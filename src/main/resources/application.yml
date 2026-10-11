@@ -16,7 +16,8 @@ netsentinel:
     timeout-ms: 5000         # Per-host scan timeout
     simulated-delay-ms: 200  # Artificial delay per host in simulation
   ai:
-    model-retrain: false     # Re-train DL4J model on startup
+    model-path: /model/exploit_model.json   # Exported gradient-boosted exploitability model
+    known-exploited-probability: 0.9        # Floor for CVEs already in CISA KEV
     k-paths: 5               # Number of attack paths to compute
   graph:
     max-nodes: 500           # Maximum nodes in attack graph
@@ -31,5 +32,3 @@ netsentinel:
 logging:
   level:
     com.netsentinel: DEBUG
-    org.deeplearning4j: WARN
-    org.nd4j: WARN

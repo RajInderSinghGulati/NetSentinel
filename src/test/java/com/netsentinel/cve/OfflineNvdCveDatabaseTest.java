@@ -37,6 +37,16 @@ class OfflineNvdCveDatabaseTest {
         CveRecord r = db.findByCpe("cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*").stream()
                 .filter(c -> c.cveId().equals("CVE-2021-44228")).findFirst().orElseThrow();
         assertEquals(2021, r.publishedYear());
-        assertEquals("apache", r.vendor());
+        // Feature parity with scripts/build_dataset.py (values checked against data/cve_features.csv)
+        assertEquals("cisco", r.vendor());
+        assertEquals("CWE-20", r.cweId());
+        assertEquals("CHANGED", r.scope());
+        assertEquals(373, r.affectedCpes().size());
+    }
+
+    @Test
+    void cweSkipsNvdPlaceholdersLikeTheTrainingPipeline() {
+        CveRecord r = db.findAll().stream().filter(c -> c.cveId().equals("CVE-2023-44487")).findFirst().orElseThrow();
+        assertEquals("CWE-400", r.cweId()); // first weakness entry is NVD-CWE-noinfo
     }
 }

@@ -35,7 +35,7 @@ public class NetSentinelApplication {
             ║                    ╩ ╩╩                                     ║
             ║                                                            ║
             ║   Autonomous Network Vulnerability Assessment Engine       ║
-            ║   Java 21 LTS | Spring Boot 3.2 | JGraphT | DL4J          ║
+            ║   Java 21 LTS | Spring Boot 3.2 | JGraphT | GBT model     ║
             ║                                                            ║
             ╚══════════════════════════════════════════════════════════════╝
             """);

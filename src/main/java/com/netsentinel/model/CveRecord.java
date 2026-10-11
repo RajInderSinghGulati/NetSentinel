@@ -20,7 +20,11 @@ import java.util.List;
  * @param patchAvailable    Whether an official patch exists
  * @param exploitInWild     Whether active exploitation has been observed
  * @param publishedYear     Year the CVE was published (0 if unknown); used for temporal train/test splits
- * @param vendor            Primary vendor taken from the first affected CPE ("unknown" if none)
+ * @param vendor            Vendor of the affected product ("unknown" if none)
+ * @param scope             CVSS scope: UNCHANGED or CHANGED
+ * @param confImpact        CVSS confidentiality impact: NONE, LOW, HIGH
+ * @param integImpact       CVSS integrity impact: NONE, LOW, HIGH
+ * @param availImpact       CVSS availability impact: NONE, LOW, HIGH
  */
 public record CveRecord(
         String cveId,
@@ -35,10 +39,17 @@ public record CveRecord(
         boolean patchAvailable,
         boolean exploitInWild,
         int publishedYear,
-        String vendor
+        String vendor,
+        String scope,
+        String confImpact,
+        String integImpact,
+        String availImpact
 ) {
 
-    /** Convenience constructor: derives year from the CVE id and vendor from the first CPE. */
+    /**
+     * Convenience constructor for hand-written records (simulated DB): derives year from the
+     * CVE id, vendor from the CPEs, and approximates scope/CIA impact from the base score.
+     */
     public CveRecord(String cveId, String description, double cvssBaseScore,
                      AttackVector attackVector, AttackComplexity attackComplexity,
                      PrivilegesRequired privilegesRequired, UserInteraction userInteraction,
@@ -47,14 +58,13 @@ public record CveRecord(
         this(cveId, description, cvssBaseScore, attackVector, attackComplexity,
                 privilegesRequired, userInteraction, cweId, affectedCpes,
                 patchAvailable, exploitInWild,
-                yearFromId(cveId), vendorFromCpes(affectedCpes));
+                yearFromId(cveId), vendorFromCpes(affectedCpes),
+                "UNCHANGED", impactFromScore(cvssBaseScore),
+                impactFromScore(cvssBaseScore), impactFromScore(cvssBaseScore));
     }
 
-    /** Copy with the vendor set to the product actually matched on a host. */
-    public CveRecord withVendor(String newVendor) {
-        return new CveRecord(cveId, description, cvssBaseScore, attackVector, attackComplexity,
-                privilegesRequired, userInteraction, cweId, affectedCpes,
-                patchAvailable, exploitInWild, publishedYear, newVendor);
+    private static String impactFromScore(double cvss) {
+        return cvss >= 7.0 ? "HIGH" : cvss >= 4.0 ? "LOW" : "NONE";
     }
 
     public static int yearFromId(String cveId) {
@@ -68,15 +78,22 @@ public record CveRecord(
 
     public static String vendorFromCpes(List<String> cpes) {
         if (cpes == null || cpes.isEmpty()) return "unknown";
-        // Most frequent vendor (ties: alphabetical) — the first CPE is often a downstream product.
-        java.util.Map<String, Integer> counts = new java.util.TreeMap<>();
+        // Most frequent vendor among affected CPEs, ties broken by first occurrence. Must match
+        // scripts/build_dataset.py (Counter.most_common), because it is a model feature.
+        java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<>();
         for (String cpe : cpes) {
             String[] parts = cpe.split(":");
             if (parts.length > 3 && !parts[3].equals("*")) counts.merge(parts[3], 1, Integer::sum);
         }
-        return counts.entrySet().stream()
-                .max(java.util.Map.Entry.comparingByValue())
-                .map(java.util.Map.Entry::getKey).orElse("unknown");
+        String best = "unknown";
+        int bestCount = 0;
+        for (var e : counts.entrySet()) {
+            if (e.getValue() > bestCount) {
+                best = e.getKey();
+                bestCount = e.getValue();
+            }
+        }
+        return best;
     }
 
     public enum AttackVector { NETWORK, ADJACENT, LOCAL, PHYSICAL }

@@ -143,7 +143,11 @@ public class NvdApiClient {
         for (String metricKey : List.of("cvssMetricV31", "cvssMetricV30")) {
             JsonNode metricArray = cveNode.path("metrics").path(metricKey);
             if (metricArray.isArray() && metricArray.size() > 0) {
-                cvssData = metricArray.get(0).path("cvssData");
+                JsonNode chosen = metricArray.get(0);
+                for (JsonNode m : metricArray) {
+                    if ("Primary".equals(m.path("type").asText())) { chosen = m; break; }
+                }
+                cvssData = chosen.path("cvssData");
                 break;
             }
         }
@@ -153,6 +157,7 @@ public class NvdApiClient {
         AttackComplexity attackComplexity = AttackComplexity.LOW;
         PrivilegesRequired privilegesRequired = PrivilegesRequired.NONE;
         UserInteraction userInteraction = UserInteraction.NONE;
+        String scope = "UNCHANGED", confImpact = "LOW", integImpact = "LOW", availImpact = "LOW";
 
         if (cvssData != null && !cvssData.isMissingNode()) {
             baseScore = cvssData.path("baseScore").asDouble(4.0);
@@ -162,15 +167,23 @@ public class NvdApiClient {
             privilegesRequired = parsePrivilegesRequired(cvssData.path("privilegesRequired").asText("NONE"));
             userInteraction = "NONE".equals(cvssData.path("userInteraction").asText("NONE"))
                     ? UserInteraction.NONE : UserInteraction.REQUIRED;
+            scope = cvssData.path("scope").asText(scope);
+            confImpact = cvssData.path("confidentialityImpact").asText(confImpact);
+            integImpact = cvssData.path("integrityImpact").asText(integImpact);
+            availImpact = cvssData.path("availabilityImpact").asText(availImpact);
         }
 
-        // Extract CWE
-        String cweId = "CWE-UNKNOWN";
-        JsonNode weaknesses = cveNode.path("weaknesses");
-        if (weaknesses.isArray() && weaknesses.size() > 0) {
-            for (JsonNode desc : weaknesses.get(0).path("description")) {
-                cweId = desc.path("value").asText(cweId);
-                break;
+        // Extract CWE: first "CWE-*" value across all weakness entries (same rule as
+        // scripts/build_dataset.py, so inference features match training features)
+        String cweId = "NVD-CWE-noinfo";
+        cwe:
+        for (JsonNode weakness : cveNode.path("weaknesses")) {
+            for (JsonNode desc : weakness.path("description")) {
+                String v = desc.path("value").asText("");
+                if (v.startsWith("CWE-")) {
+                    cweId = v;
+                    break cwe;
+                }
             }
         }
 
@@ -191,7 +204,8 @@ public class NvdApiClient {
                 cveId, description, baseScore,
                 attackVector, attackComplexity, privilegesRequired, userInteraction,
                 cweId, affected, patchAvailable, exploitInWild,
-                year, CveRecord.vendorFromCpes(sourceCpe != null ? List.of(sourceCpe) : affected)
+                year, CveRecord.vendorFromCpes(affected),
+                scope, confImpact, integImpact, availImpact
         );
     }
 
