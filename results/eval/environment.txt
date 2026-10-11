@@ -1,0 +1,6 @@
+date: 2026-10-12T02:34:03
+cpu: AMD Ryzen 5 4600H with Radeon Graphics          (6 cores / 12 threads)
+ram_gb: 7.4
+os: Microsoft Windows 11 Home Single Language
+java: java version "24.0.2" 2025-07-15
+heap: -Xmx6g
