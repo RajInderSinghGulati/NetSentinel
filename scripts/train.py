@@ -34,6 +34,8 @@ from sklearn.preprocessing import StandardScaler
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "results"
 
+EXPLOIT_LEAD_DAYS = 30   # an exploit may legitimately precede the NVD entry by a few weeks
+
 CVSS_CATS = ["av", "ac", "pr", "ui", "scope", "conf_impact", "integ_impact", "avail_impact"]
 
 
@@ -50,6 +52,16 @@ def build_label(df, label, horizon_days=365):
         return df["kev"].astype(int), pub <= snapshot - pd.Timedelta(days=horizon_days)
     if label == "exploitdb":
         return df["exploitdb"].astype(int), pub <= snapshot - pd.Timedelta(days=horizon_days)
+    if label in ("exploitdb365", "msf365"):
+        # public exploit (any Exploit-DB entry) or Metasploit module within 365 days of NVD publication
+        col = "exploitdb_first_date" if label == "exploitdb365" else "msf_first_date"
+        first = pd.to_datetime(df[col], errors="coerce")
+        lag = (first - pub).dt.days
+        # An exploit dated long BEFORE the CVE existed is a CVE-id mapping error in Exploit-DB (e.g. a 2012
+        # exploit listed for a 2024 CVE), not a real label: such CVEs are left out instead of counted as positives.
+        y = lag.notna() & (lag <= horizon_days) & (lag >= -EXPLOIT_LEAD_DAYS)
+        eligible = (pub <= snapshot - pd.Timedelta(days=horizon_days)) & ~(lag < -EXPLOIT_LEAD_DAYS)
+        return y.astype(int), eligible
     raise SystemExit(f"unknown label {label}")
 
 
@@ -152,11 +164,14 @@ def fit_predict(name, model, Xtr, ytr, Xte):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--label", default="kev365", choices=["kev365", "kev_ever", "exploitdb"])
+    ap.add_argument("--label", default="kev365", choices=["kev365", "kev_ever", "exploitdb", "exploitdb365", "msf365"])
+    ap.add_argument("--train-start", type=int, default=2016,
+                    help="first publication year in the training set (KEV only exists since late 2021, so earlier CVEs can hardly be positive)")
     ap.add_argument("--train-end", type=int, default=2021)
     ap.add_argument("--test-start", type=int, default=2022)
     ap.add_argument("--test-end", type=int, default=2024)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--out", default="results", help="output folder (relative to the repo root)")
     a = ap.parse_args()
 
     df = pd.read_csv(ROOT / "data/cve_features.csv")
@@ -164,12 +179,13 @@ def main():
     df = df.merge(hist, on="cve_id", how="left")
     y_all, eligible = build_label(df, a.label)
     df = df.assign(y=y_all)[eligible].reset_index(drop=True)
-    tr = df[df.year <= a.train_end]
+    tr = df[(df.year >= a.train_start) & (df.year <= a.train_end)]
     te = df[(df.year >= a.test_start) & (df.year <= a.test_end)]
     # Fair, forward-looking test set: need a point-in-time EPSS score, and drop CVEs that were
     # already in KEV when that EPSS snapshot was taken (EPSS may already encode that fact).
     snap = pd.to_datetime(te["epss_snapshot_date"])
-    added = pd.to_datetime(te["kev_date_added"], errors="coerce")
+    pos_col = {"exploitdb365": "exploitdb_first_date", "msf365": "msf_first_date"}.get(a.label, "kev_date_added")
+    added = pd.to_datetime(te[pos_col], errors="coerce")   # when the label event became known
     keep = te["epss_at_pub"].notna() & ~(added.notna() & (added <= snap))
     print(f"fair test set: kept {int(keep.sum())}/{len(te)} CVEs "
           f"(dropped {int((~keep).sum())}: no EPSS history or already in KEV at snapshot)")
@@ -179,7 +195,8 @@ def main():
         sys.exit("too few positives for a meaningful evaluation; widen the year ranges")
 
     ytr, yte = tr.y.to_numpy(), te.y.to_numpy()
-    RESULTS.mkdir(exist_ok=True)
+    RESULTS = ROOT / a.out
+    RESULTS.mkdir(parents=True, exist_ok=True)
     preds, report = {}, {}
 
     # baselines that need no training

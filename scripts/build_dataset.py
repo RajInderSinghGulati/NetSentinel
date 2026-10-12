@@ -212,14 +212,22 @@ def load_kev(force):
 
 
 def load_exploitdb(force):
+    """CVE -> earliest publication date of (a) any Exploit-DB exploit and (b) a Metasploit module."""
     p = fetch_cached(EDB_URL, RAW / "exploitdb.csv", force)
-    cves = set()
+    first, msf = {}, {}
     with open(p, encoding="utf-8", newline="") as f:
         for row in csv.DictReader(f):
+            date = (row.get("date_published") or "").strip()
+            if not date:
+                continue
+            is_msf = row.get("author", "").strip().lower() == "metasploit" or "metasploit" in row.get("tags", "").lower()
             for c in re.findall(r"CVE-\d{4}-\d{4,}", row.get("codes", "")):
-                cves.add(c)
-    log(f"Exploit-DB: {len(cves)} distinct CVEs with a public exploit")
-    return cves
+                if c not in first or date < first[c]:
+                    first[c] = date
+                if is_msf and (c not in msf or date < msf[c]):
+                    msf[c] = date
+    log(f"Exploit-DB: {len(first)} distinct CVEs with a public exploit, {len(msf)} with a Metasploit module")
+    return first, msf
 
 
 def load_epss(force):
@@ -249,12 +257,13 @@ def main():
         fetch_nvd(a.start_year, a.api_key)
     rows = load_nvd_rows()
     kev = load_kev(a.refresh_labels)
-    edb = load_exploitdb(a.refresh_labels)
+    edb, msf = load_exploitdb(a.refresh_labels)
     epss, epss_date = load_epss(a.refresh_labels)
 
     cols = ["cve_id", "published", "year", "cvss_base", "av", "ac", "pr", "ui", "scope",
             "conf_impact", "integ_impact", "avail_impact", "cwe", "vendor", "n_affected_cpes",
-            "kev", "kev_date_added", "exploitdb", "epss", "epss_percentile"]
+            "kev", "kev_date_added", "exploitdb", "exploitdb_first_date", "msf_first_date",
+            "epss", "epss_percentile"]
     out = DATA / "cve_features.csv"
     with open(out, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -264,18 +273,25 @@ def main():
             r["kev"] = int(cid in kev)
             r["kev_date_added"] = kev.get(cid, "")
             r["exploitdb"] = int(cid in edb)
+            r["exploitdb_first_date"] = edb.get(cid, "")
+            r["msf_first_date"] = msf.get(cid, "")
             e = epss.get(cid)
             r["epss"], r["epss_percentile"] = (e if e else ("", ""))
             w.writerow(r)
 
     by_year = collections.Counter(r["year"] for r in rows)
     kev_by_year = collections.Counter(r["year"] for r in rows if r["kev"])
+    built = dt.date.today().isoformat()
+    old_manifest = DATA / "manifest.json"
+    if a.skip_nvd and not a.refresh_labels and old_manifest.exists():
+        built = json.loads(old_manifest.read_text())["built"]   # same snapshot as the earlier run
     manifest = {
-        "built": dt.date.today().isoformat(),
+        "built": built,
         "epss_score_date": epss_date,
         "rows": len(rows),
         "kev_positive": sum(r["kev"] for r in rows),
         "exploitdb_positive": sum(r["exploitdb"] for r in rows),
+        "msf_positive": sum(1 for r in rows if r["msf_first_date"]),
         "per_year": {str(y): {"cves": by_year[y], "kev": kev_by_year[y]} for y in sorted(by_year)},
         "sha256": {p.name: sha256(p) for p in [out, RAW / "kev.json", RAW / "exploitdb.csv", RAW / "epss.csv.gz"]},
     }
